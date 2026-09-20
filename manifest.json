@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "mystaryo.media",
+  "name": "Media spectrum + player",
+  "version": "1.2.0",
+  "author": "mystaryo",
+  "description": "Always-on 60fps cava spectrum with 18 selectable visual styles in the bar. Click for Now Playing (any MPRIS player, cover art, transport), a cliamp browser tab, and a settings tab.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "MediaWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Media spectrum",
+    "description": "Live spectrum with selectable styles. Click for player controls and cliamp.",
+    "category": "Audio",
+    "allowMultiple": false
+  }
+}
