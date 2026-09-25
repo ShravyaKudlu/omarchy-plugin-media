@@ -295,6 +295,9 @@ BarWidget {
     try { if (p) return !!p.isPlaying } catch (e) {}
     return root.cliampState === "playing"
   }
+  function cliampRadioActive() {
+    return root.cliampUp && root.cliampState !== "stopped"
+  }
   function toggleCliamp() {
     var p = cliampPlayer()
     if (p && root.canToggle(p)) {
@@ -480,6 +483,7 @@ BarWidget {
 
   // ---- cliamp tab state ----
   property bool cliampUp: false
+  property bool radioStopped: false
   property string cliampState: ""
   property string cliampTrack: ""
   property var cliampStation: ({ label: "", path: "" })
@@ -577,7 +581,7 @@ BarWidget {
   function noteCliampSnapshot(snap) {
     if (!snap) {
       root.cliampUp = false
-      root.cliampState = ""
+      if (!root.radioStopped) root.cliampState = ""
       root.cliampTrack = ""
       root.cliampStation = ({ label: "", path: "" })
       root.prevCliampPlaying = false
@@ -585,6 +589,7 @@ BarWidget {
     }
     root.cliampUp = true
     root.cliampState = String(snap.state || "")
+    root.radioStopped = root.cliampState === "stopped"
     try {
       var lt = snap.logical_track || {}
       var label = String(lt.title || lt.station || lt.path || "")
@@ -719,6 +724,7 @@ BarWidget {
         var up = false
         try { up = !!(JSON.parse(out) || {}).ok } catch (e) {}
         if (up) {
+          root.radioStopped = false
           root.cliampNote = ""
           refreshCliampTab()
           if (cb) cb()
@@ -730,6 +736,12 @@ BarWidget {
       })
     }
     defer(wait)
+  }
+  function startRadio() {
+    var station = root.topStations.length > 0 ? root.topStations[0] : null
+    if (!station) return
+    if (root.cliampUp) playStation(station)
+    else startCliampDaemon(function() { playStation(station) })
   }
 
   // ---- bar visualizer style (selectable, persisted) ----
@@ -865,20 +877,6 @@ BarWidget {
     saveSettings()
     try { vizCanvas.requestPaint() } catch (e) {}
   }
-  function cycleVisualStyle() {
-    // Right-click cycling never changes display mode: a Words strip
-    // stays Words (the spectrum cycles silently underneath).
-    var kept = root.barMode
-    var idx = 0
-    for (var i = 0; i < visualStyles.length; i++)
-      if (visualStyles[i].id === root.visualStyle) idx = i
-    setVisualStyle(visualStyles[(idx + 1) % visualStyles.length].id)
-    if (root.barMode !== kept) {
-      root.barMode = kept
-      saveSettings()
-    }
-  }
-
   // ---- bar presence: the strip IS a stock WidgetButton; the canvas floats
   // above its blank label ignoring mouse input, so hover/clicks fall through.
   implicitWidth: root.cavaDead ? 24 : (root.barMode === "track" ? trackRow.width + Style.space(8) : vizCanvas.width + Style.space(8))
@@ -1236,7 +1234,7 @@ BarWidget {
         Row {
           width: parent.width
           spacing: Style.space(6)
-          visible: root.cliampUp
+          visible: root.cliampRadioActive()
           Button {
             id: cliampToggle
             iconText: root.cliampPlaying() ? "" : ""
@@ -1264,6 +1262,28 @@ BarWidget {
             onClicked: root.toggleFavorite(root.cliampStation)
           }
         }
+        Button {
+          width: parent.width
+          visible: root.cliampRadioActive()
+          text: "Stop Radio"
+          foreground: root.bar.foreground
+          bordered: true
+          onClicked: {
+            root.cliampNote = "Stopping Radio…"
+            root.cliampCall("runtime.stop", {}, function(res) {
+              if (res === null) {
+                root.cliampNote = "Couldn't stop Radio."
+                return
+              }
+              root.cliampState = "stopped"
+              root.radioStopped = true
+              root.cliampTrack = ""
+              root.cliampStation = ({ label: "", path: "" })
+              root.prevCliampPlaying = false
+              root.cliampNote = ""
+            })
+          }
+        }
         Text {
           textFormat: Text.PlainText
           width: parent.width
@@ -1271,54 +1291,62 @@ BarWidget {
           font.family: root.bar.fontFamily
           font.pixelSize: Style.font.bodySmall
           color: Qt.darker(root.bar.foreground, 1.3)
-          visible: !root.cliampUp
+          visible: !root.cliampUp && !root.radioStopped
           text: "Radio daemon not running."
         }
         Row {
           width: parent.width
           spacing: Style.space(6)
-          visible: !root.cliampUp
+          visible: !root.cliampRadioActive()
           Button {
+            width: parent.width
             iconText: ""
             text: "Start Radio"
             foreground: root.bar.foreground
-            onClicked: startCliampDaemon()
+            bordered: true
+            onClicked: startRadio()
           }
           Button {
             iconText: ""
             text: "Open Radio"
             foreground: root.bar.foreground
+            visible: !root.cliampUp
             onClicked: if (root.bar) root.bar.run("xdg-terminal-exec --app-id=org.omarchy.cliamp -e cliamp")
           }
         }
         Row {
           width: parent.width
           spacing: Style.space(6)
+          visible: root.cliampRadioActive()
           Button {
             width: (parent.width - parent.spacing) / 2
-            text: root.radioView === "favorites" ? "All stations" : "★ Favorites"
+            iconText: "★"
+            text: root.radioView === "favorites" ? "All stations" : "Favorites"
+            leftAlign: true
+            bordered: true
+            selected: root.radioView === "favorites"
             foreground: root.bar.foreground
             onClicked: {
               root.radioView = root.radioView === "favorites" ? "all" : "favorites"
-              if (root.radioView !== "all") {
-                root.searchQuery = ""
-                root.searchRows = []
-                root.cliampNote = ""
-              }
+              root.searchQuery = ""
+              root.searchRows = []
+              root.cliampNote = ""
             }
           }
           Button {
             width: (parent.width - parent.spacing) / 2
+            iconText: "↻"
             text: root.radioView === "recent" ? "All stations" : "Recently played"
+            leftAlign: true
+            bordered: true
+            selected: root.radioView === "recent"
             foreground: root.bar.foreground
             onClicked: {
               root.radioView = root.radioView === "recent" ? "all" : "recent"
-              if (root.radioView !== "all") {
-                root.searchQuery = ""
-                root.searchRows = []
-                root.cliampNote = ""
-                root.loadPlayCounts()
-              }
+              root.searchQuery = ""
+              root.searchRows = []
+              root.cliampNote = ""
+              if (root.radioView === "recent") root.loadPlayCounts()
             }
           }
         }
@@ -1327,7 +1355,7 @@ BarWidget {
         Row {
           width: parent.width
           spacing: Style.space(6)
-          visible: root.cliampUp && root.radioView === "all"
+          visible: root.cliampRadioActive() && root.radioView === "all"
           Rectangle {
             width: parent.width
             height: Math.max(searchText.implicitHeight, Style.font.bodySmall) + Style.space(8)
@@ -1387,7 +1415,7 @@ BarWidget {
           contentHeight: stationList.implicitHeight
           clip: true
           flickableDirection: Flickable.VerticalFlick
-          visible: root.cliampUp
+          visible: root.cliampRadioActive()
           Column {
             id: stationList
             width: parent.width

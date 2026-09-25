@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
   "id": "mystaryo.media",
-  "name": "Media spectrum + player",
+  "name": "Resonance",
   "version": "1.2.0",
   "author": "mystaryo",
-  "description": "Always-on 60fps cava spectrum with 18 selectable visual styles in the bar. Click for Now Playing (any MPRIS player, cover art, transport), a cliamp browser tab, and a settings tab.",
+  "description": "Live cava spectrum with 18 selectable visual styles in the bar. Click for Now Playing (any MPRIS player, cover art, transport), a cliamp radio tab, and settings.",
   "kinds": [
     "bar-widget"
   ],
@@ -12,8 +12,8 @@
     "barWidget": "MediaWidget.qml"
   },
   "barWidget": {
-    "displayName": "Media spectrum",
-    "description": "Live spectrum with selectable styles. Click for player controls and cliamp.",
+    "displayName": "Resonance",
+    "description": "Live audio spectrum with selectable styles, player controls, and cliamp radio.",
     "category": "Audio",
     "allowMultiple": false
   }

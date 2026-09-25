@@ -1,6 +1,6 @@
-# mystaryo.media — spectrum bar widget + player popup
+# Resonance — spectrum bar widget + player popup
 
-Always-on 60fps cava spectrum in the Omarchy bar. The strip is a stock
+Live cava spectrum in the Omarchy bar. The strip is a stock
 `WidgetButton`, so hover tooltip, pointing-hand cursor, and click routing
 behave exactly like the built-in widgets. Hover shows the playing track in a
 pill below the bar (title — artist). Left-click opens a three-tab popup,
@@ -46,7 +46,8 @@ ECG, Waveform. Pick in the gear tab; right-click toggles Words/Spectrum.
 - `cava` (`omarchy pkg add cava`) + `parecord`/`pactl` (libpulse,
   preinstalled): audio arrives via a low-latency `parecord` bridge (default
   sink monitor, raw s16le, 50ms latency) into a fifo that cava reads at
-  60fps — cava 0.10.x's native PipeWire/Pulse inputs attach but read zeros
+  the selected visualizer FPS (30 by default) — cava 0.10.x's native
+  PipeWire/Pulse inputs attach but read zeros
   on this system. The wrapper reaps stale fifo writers on startup, so
   hot-reloads can't stack duplicate recorders. Without them, the bar shows
   a static ♪.
