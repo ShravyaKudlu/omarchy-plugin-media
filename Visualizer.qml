@@ -18,6 +18,8 @@ Canvas {
   property color foreground: "transparent"
   property string visualStyle: "wave"
   property bool dead: false
+  // Display gain from the sensitivity setting (0.6 calm .. 1.6 wild).
+  property real sensitivity: 1.0
 
   // Animation clock (seconds) for the motion styles.
   property real phase: 0
@@ -208,10 +210,10 @@ Canvas {
     }
   }
 
-  // Level 0..1 per bin (pow 0.7 lifts mids); cava spans the full range.
+  // Level 0..1 per bin (pow 0.7 lifts mids); sensitivity gain first.
   function level(i) {
     try {
-      var f = Math.min(1, (barValues[i] || 0) / barMax)
+      var f = Math.min(1, (barValues[i] || 0) / barMax * (sensitivity || 1))
       return Math.pow(f, 0.7)
     } catch (e) { return 0 }
   }

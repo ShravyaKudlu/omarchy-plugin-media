@@ -171,6 +171,73 @@ BarWidget {
     return String(player.dbusName || "").indexOf("cliamp") !== -1
   }
   readonly property var selectedPlayer: sourcePlayers.length > 0 ? sourcePlayers[0] : null
+  // Live title/artist with last-known fallback (persisted: survives reboot).
+  readonly property string nowTitle: root.selectedPlayer ? (root.selectedPlayer.trackTitle || "") : ""
+  readonly property string nowArtist: root.selectedPlayer ? (root.selectedPlayer.trackArtist || "") : ""
+  // Live app playing flag. Rising edge = app started -> cliamp yields.
+  // Falling edges never act, so mutual pauses cannot loop.
+  readonly property bool appPlaying: root.selectedPlayer ? !!root.selectedPlayer.isPlaying : false
+  onAppPlayingChanged: {
+    if (root.appPlaying && root.cliampPlaying()) {
+      pauseCliamp()
+      root.lastSource = "app"
+      saveSettings()
+    }
+  }
+  property string lastTitle: ""
+  property string lastArtist: ""
+  // Which side played last ("app" | "cliamp") — idle strip shows its text.
+  property string lastSource: "app"
+  // ---- strip display source: whichever side plays wins; idle shows
+  // the side that played last, dimmed. Mirrors the mutual-pause rule,
+  // so display and playback can never disagree.
+  function stripIsCliamp() {
+    try { return root.cliampPlaying() } catch (e) { return false }
+  }
+  function stripPlaying() {
+    // Bright iff something is actually playing (either side).
+    try {
+      if (stripIsCliamp()) return true
+      return !!(root.selectedPlayer && root.selectedPlayer.isPlaying)
+    } catch (e) { return false }
+  }
+  function appText(live) {
+    var t = live ? root.nowTitle : root.lastTitle
+    var a = live ? root.nowArtist : root.lastArtist
+    if (t === "") return ""
+    return t + (a !== "" ? " — " + a : "")
+  }
+  function stripText() {
+    try {
+      if (stripIsCliamp()) {
+        if (root.cliampTrack !== "") return root.cliampTrack
+        return "cliamp " + (root.cliampState !== "" ? root.cliampState : "…")
+      }
+      if (root.appPlaying) return appText(true)
+      // Idle: the side that played last wins, dimmed — stale titles on
+      // the other side never steal the strip.
+      if (root.lastSource === "cliamp" && root.cliampTrack !== "") return root.cliampTrack
+      var at = appText(false)
+      if (at !== "") return at
+      if (root.cliampTrack !== "") return root.cliampTrack
+      return "Nothing playing"
+    } catch (e) { return "Nothing playing" }
+  }
+  onNowTitleChanged: {
+    if (root.nowTitle !== "") {
+      root.lastTitle = root.nowTitle
+      root.lastArtist = root.nowArtist
+      saveSettings()
+    }
+  }
+  // Bar display mode: spectrum visual vs now-playing track row.
+  property string barMode: "visual"
+  function barModeValid(id) { return id === "visual" || id === "track" }
+  function setBarMode(id) {
+    if (!barModeValid(id) || root.barMode === id) return
+    root.barMode = id
+    saveSettings()
+  }
   // Tab-0 player switcher jumps straight to a preferred-app lock.
   function selectPlayer(player) {
     if (!player) return
@@ -184,9 +251,47 @@ BarWidget {
   function canStep(p, dir) { try { return !!(p && ((dir < 0 && p.canGoPrevious) || (dir > 0 && p.canGoNext))) } catch (e) { return false } }
   function togglePlayer(p) {
     if (!p) return
+    // Starting music pauses cliamp and owns the strip (mutual exclusion).
+    try {
+      if (p && !root.isCliamp(p) && !p.isPlaying) {
+        pauseCliamp()
+        root.lastSource = "app"
+        saveSettings()
+      }
+    } catch (e) {}
     try {
       if (p.isPlaying) { if (p.canPause) p.pause(); else if (p.canTogglePlaying) p.togglePlaying() }
       else { if (p.canPlay) p.play(); else if (p.canTogglePlaying) p.togglePlaying() }
+    } catch (e) {}
+  }
+  function pausePlayer(p) {
+    // Pause whenever capable — no isPlaying guard: MPRIS status lags
+    // reality and the guard skipped real pauses. Pausing a paused
+    // player is a harmless no-op.
+    if (!p) return
+    try {
+      if (p.canPause) { p.pause(); root.dbg("paused " + shortLabel(p)) }
+      else if (p.canTogglePlaying && p.isPlaying) { p.togglePlaying(); root.dbg("toggled " + shortLabel(p)) }
+      else root.dbg("unpausable " + shortLabel(p))
+    } catch (e) { root.dbg("pause failed") }
+  }
+  function pauseCliamp() {
+    // Pause whatever cliamp is doing: its MPRIS player first, else daemon
+    // IPC pause with stop fallback (unknown op = safe no-op). Never throws.
+    try {
+      var p = cliampPlayer()
+      if (p) { pausePlayer(p); return }
+    } catch (e) {}
+    if (root.cliampPlaying()) cliampCall("runtime.pause", {}, function(res) {
+      if (res === null) cliampCall("runtime.stop", {}, function() { refreshCliampTab() })
+      else refreshCliampTab()
+    })
+  }
+  function pauseSelectedForCliamp() {
+    // cliamp is starting: pause the Now Playing app (never cliamp itself).
+    try {
+      var p = root.selectedPlayer
+      if (p && !root.isCliamp(p)) pausePlayer(p)
     } catch (e) {}
   }
   function stopPlayer(p) {
@@ -217,10 +322,19 @@ BarWidget {
   function toggleCliamp() {
     var p = cliampPlayer()
     if (p && root.canToggle(p)) {
+      // Known play transition only: pausing cliamp needs no cross-action.
+      try {
+        if (!p.isPlaying) {
+          pauseSelectedForCliamp()
+          root.lastSource = "cliamp"
+          saveSettings()
+        }
+      } catch (e) {}
       root.togglePlayer(p)
       return
     }
-    // No MPRIS player (yet): toggle headless via IPC.
+    // No MPRIS player (yet): direction unknown, so no cross-action here —
+    // explicit starts below still pause the app. Toggle headless via IPC.
     cliampCall("runtime.toggle", {}, function() { refreshCliampTab() })
   }
 
@@ -387,6 +501,9 @@ BarWidget {
   property bool cliampUp: false
   property string cliampState: ""
   property string cliampTrack: ""
+  // Edge memory for the exclusion watch: first snapshot only records.
+  property bool prevCliampPlaying: false
+  property bool cliampKnown: false
   property var searchRows: []
   property string cliampNote: ""
   property string searchQuery: ""
@@ -437,27 +554,54 @@ BarWidget {
     { label: "NCS Chill Stream", path: "https://radio.cliamp.stream/ncs-chill/stream" }
   ]
 
-  function refreshCliampTab() {
-    loadPlayCounts()
+  function noteCliampSnapshot(snap) {
+    if (!snap) {
+      root.cliampUp = false
+      root.cliampState = ""
+      root.cliampTrack = ""
+      root.prevCliampPlaying = false
+      return
+    }
+    root.cliampUp = true
+    root.cliampState = String(snap.state || "")
+    try {
+      var lt = snap.logical_track || {}
+      root.cliampTrack = String(lt.title || lt.path || "")
+    } catch (e) { root.cliampTrack = "" }
+    // Rising edge only: cliamp started -> app yields + owns the strip.
+    // First snapshot only records, so a pre-playing daemon never
+    // ambushes playback on widget load. Falling edges never act.
+    var nowPlaying = (root.cliampState === "playing")
+    if (root.cliampKnown) {
+      if (nowPlaying && !root.prevCliampPlaying) {
+        if (root.appPlaying) pauseSelectedForCliamp()
+        root.lastSource = "cliamp"
+        saveSettings()
+      }
+    } else {
+      root.cliampKnown = true
+    }
+    root.prevCliampPlaying = nowPlaying
+  }
+  function refreshCliampTab(skipCounts) {
+    if (!skipCounts) loadPlayCounts()
     runCmd(["cliamp", "remote", "state"], function(out) {
       var snap = null
       try {
         var j = JSON.parse(out)
         if (j && j.ok) snap = j.snapshot
       } catch (e) {}
-      if (!snap) {
-        root.cliampUp = false
-        root.cliampState = ""
-        root.cliampTrack = ""
-        return
-      }
-      root.cliampUp = true
-      root.cliampState = String(snap.state || "")
-      try {
-        var lt = snap.logical_track || {}
-        root.cliampTrack = String(lt.title || lt.path || "")
-      } catch (e) { root.cliampTrack = "" }
+      noteCliampSnapshot(snap)
     })
+  }
+  // Exclusion watch: light state poll so external cliamp starts
+  // (terminal, TUI) also yield the app. Rising edges only — loop-free.
+  Timer {
+    id: exclusionPoll
+    interval: 3000
+    repeat: true
+    running: true
+    onTriggered: refreshCliampTab(true)
   }
   function normRows(res) {
     // Normalize the various result shapes into [{label, ref}] defensively.
@@ -485,6 +629,9 @@ BarWidget {
     var path = ""
     try { label = String(station.label || ""); path = String(station.path || "") } catch (e) {}
     if (path === "") { root.cliampNote = "Couldn't start that entry."; return }
+    pauseSelectedForCliamp()
+    root.lastSource = "cliamp"
+    saveSettings()
     root.cliampNote = "Loading " + label + "…"
     cliampCall("track.play", { track: { title: label, path: path, stream: true, realtime: true } }, function(res) {
       if (res === null) {
@@ -526,6 +673,9 @@ BarWidget {
     var ref = null
     try { ref = row.ref } catch (e) {}
     if (!ref) { root.cliampNote = "Couldn't start that entry."; return }
+    pauseSelectedForCliamp()
+    root.lastSource = "cliamp"
+    saveSettings()
     root.cliampNote = "Loading " + row.label + "…"
     cliampCall("track.play", { track: ref }, function(res) {
       if (res === null) {
@@ -585,6 +735,25 @@ BarWidget {
       if (visualStyles[i].id === id) return true
     return false
   }
+  // Spectrum sensitivity presets: gain applied in Visualizer.level().
+  readonly property var sensOptions: [
+    { value: 0.6, label: "Chill" },
+    { value: 0.8, label: "Soft" },
+    { value: 1.0, label: "Normal" },
+    { value: 1.3, label: "Lively" },
+    { value: 1.6, label: "Wild" }
+  ]
+  property real sensitivity: 1.0
+  function setSensitivity(v) {
+    var n = Number(v)
+    if (!isFinite(n)) return
+    if (n < 0.3) n = 0.3
+    if (n > 2.5) n = 2.5
+    if (root.sensitivity === n) return
+    root.sensitivity = n
+    saveSettings()
+    try { vizCanvas.requestPaint() } catch (e) {}
+  }
   function settingsPath() {
     try { return (Quickshell.env("HOME") || "") + "/.config/omarchy/mystaryo.media.json" } catch (e) { return "" }
   }
@@ -610,33 +779,58 @@ BarWidget {
         if (typeof j.musicPlayer === "string" && j.musicPlayer !== "") {
           root.musicPlayerPref = j.musicPlayer.toLowerCase()
         }
+        if (typeof j.sensitivity === "number" && isFinite(j.sensitivity)) {
+          var sn = j.sensitivity
+          if (sn < 0.3) sn = 0.3
+          if (sn > 2.5) sn = 2.5
+          root.sensitivity = sn
+          try { vizCanvas.requestPaint() } catch (e) {}
+        }
+        if (typeof j.barMode === "string" && barModeValid(j.barMode)) {
+          root.barMode = j.barMode
+        }
+        if (typeof j.lastTitle === "string") root.lastTitle = j.lastTitle
+        if (typeof j.lastArtist === "string") root.lastArtist = j.lastArtist
+        if (typeof j.lastSource === "string" && (j.lastSource === "app" || j.lastSource === "cliamp")) {
+          root.lastSource = j.lastSource
+        }
       } catch (e) {}
     })
   }
   function saveSettings() {
     var p = settingsPath()
     if (p === "") return
-    runCmd(["python3", "-c", "import json,os,sys; p=sys.argv[1]; s=sys.argv[2]; m=sys.argv[3];\nd={}\ntry:\n d=json.load(open(p))\nexcept Exception:\n d={}\nif not isinstance(d, dict):\n d={}\nd['visualStyle']=s;\nd['musicPlayer']=m;\nos.makedirs(os.path.dirname(p), exist_ok=True);\nopen(p,'w').write(json.dumps(d))", p, root.visualStyle, root.musicPlayerPref], null)
+    runCmd(["python3", "-c", "import json,os,sys; p=sys.argv[1]; s=sys.argv[2]; m=sys.argv[3]; g=sys.argv[4]; b=sys.argv[5]; t=sys.argv[6]; a=sys.argv[7]; ls=sys.argv[8];\nd={}\ntry:\n d=json.load(open(p))\nexcept Exception:\n d={}\nif not isinstance(d, dict):\n d={}\nd['visualStyle']=s;\nd['musicPlayer']=m;\ntry:\n d['sensitivity']=float(g)\nexcept Exception:\n pass\nd['barMode']=b;\nd['lastTitle']=t;\nd['lastArtist']=a;\nd['lastSource']=ls;\nos.makedirs(os.path.dirname(p), exist_ok=True);\nopen(p,'w').write(json.dumps(d))", p, root.visualStyle, root.musicPlayerPref, String(root.sensitivity), root.barMode, root.lastTitle, root.lastArtist, root.lastSource], null)
   }
   function saveMusicPlayer() {
     saveSettings()
   }
   function setVisualStyle(id) {
-    if (!visualStyleValid(id) || root.visualStyle === id) return
+    if (!visualStyleValid(id)) return
+    if (root.visualStyle === id && root.barMode === "visual") return
     root.visualStyle = id
+    // Picking a visual always means showing visuals.
+    if (root.barMode !== "visual") root.barMode = "visual"
     saveSettings()
     try { vizCanvas.requestPaint() } catch (e) {}
   }
   function cycleVisualStyle() {
+    // Right-click cycling never changes display mode: a Words strip
+    // stays Words (the spectrum cycles silently underneath).
+    var kept = root.barMode
     var idx = 0
     for (var i = 0; i < visualStyles.length; i++)
       if (visualStyles[i].id === root.visualStyle) idx = i
     setVisualStyle(visualStyles[(idx + 1) % visualStyles.length].id)
+    if (root.barMode !== kept) {
+      root.barMode = kept
+      saveSettings()
+    }
   }
 
   // ---- bar presence: the strip IS a stock WidgetButton; the canvas floats
   // above its blank label ignoring mouse input, so hover/clicks fall through.
-  implicitWidth: root.cavaDead ? 24 : vizCanvas.width + Style.space(8)
+  implicitWidth: root.cavaDead ? 24 : (root.barMode === "track" ? trackRow.width + Style.space(8) : vizCanvas.width + Style.space(8))
   implicitHeight: barSize
   // Tooltip gate the shell's Bar machinery reads (kept for showTooltip parity).
   readonly property bool tooltipHovered: stripButton.tooltipHovered
@@ -647,7 +841,7 @@ BarWidget {
     anchors.fill: parent
     bar: root.bar
     text: " "
-    tooltipText: root.selectedPlayer ? ((root.selectedPlayer.trackTitle || "Unknown title") + (root.selectedPlayer.trackArtist ? " — " + root.selectedPlayer.trackArtist : "")) : "Media"
+    tooltipText: root.stripIsCliamp() ? (root.cliampTrack !== "" ? root.cliampTrack : "cliamp") : (root.selectedPlayer ? ((root.selectedPlayer.trackTitle || "Unknown title") + (root.selectedPlayer.trackArtist ? " — " + root.selectedPlayer.trackArtist : "")) : "Media")
     onPressed: function(button) { root.barPress(button) }
   }
 
@@ -656,13 +850,56 @@ BarWidget {
     anchors.centerIn: parent
     width: 76
     height: parent.height
-    visible: !root.cavaDead
+    visible: !root.cavaDead && root.barMode === "visual"
     dead: root.cavaDead
     barValues: root.barValues
     barCount: root.barCount
     barMax: root.barMax
     foreground: root.bar.barForeground
     visualStyle: root.visualStyle
+    sensitivity: root.sensitivity
+  }
+  // Now-playing track row (barMode "track"): transport + elided title.
+  // Text clicks open the popup like the rest of the strip.
+  Row {
+    id: trackRow
+    anchors.centerIn: parent
+    spacing: Style.space(4)
+    visible: !root.cavaDead && root.barMode === "track"
+    // Strip transport: a real WidgetButton, so the bar's own click router
+    // (registered targets only) delivers taps here instead of the strip.
+    // Declared after stripButton, so it wins exactly its own rect.
+    WidgetButton {
+      id: toggleBtn
+      bar: root.bar
+      text: root.stripPlaying() ? "" : ""
+      tooltipText: "Play / pause"
+      onPressed: function(button) {
+        if (button === Qt.RightButton) { root.barPress(button); return }
+        // Pause whatever plays; idle resumes the displayed side
+        // (lastSource), falling back to the app when cliamp is down.
+        if (root.stripIsCliamp()) root.toggleCliamp()
+        else if (root.selectedPlayer && root.selectedPlayer.isPlaying) root.togglePlayer(root.selectedPlayer)
+        else if (root.lastSource === "cliamp" && root.cliampUp) root.toggleCliamp()
+        else root.togglePlayer(root.selectedPlayer)
+      }
+    }
+    Text {
+      id: trackText
+      anchors.verticalCenter: parent.verticalCenter
+      width: Math.min(150, implicitWidth)
+      elide: Text.ElideRight
+      textFormat: Text.PlainText
+      font.family: root.bar.fontFamily
+      font.pixelSize: Style.font.bodySmall
+      color: root.bar.foreground
+      opacity: root.stripPlaying() ? 1.0 : 0.55
+      text: root.stripText()
+      MouseArea {
+        anchors.fill: parent
+        onClicked: root.barPress(Qt.LeftButton)
+      }
+    }
   }
   Text {
     anchors.centerIn: parent
@@ -685,7 +922,12 @@ BarWidget {
       root.cardX = p.x
       root.cardY = p.y
     } catch (e) {}
-    root.tabIndex = (root.selectedPlayer && (root.selectedPlayer.isPlaying || root.selectedPlayer.trackTitle)) ? 0 : 1
+    // Popup opens where the strip points: playing side first, else the
+    // side that played last, else the cliamp tab (cold-start in reach).
+    if (root.stripIsCliamp()) root.tabIndex = 1
+    else if (root.appPlaying) root.tabIndex = 0
+    else if (root.lastSource === "cliamp") root.tabIndex = 1
+    else root.tabIndex = (root.selectedPlayer && root.selectedPlayer.trackTitle) ? 0 : 1
     if (root.tabIndex === 1) refreshCliampTab()
     root.popupOpen = !root.popupOpen
   }
@@ -1145,14 +1387,39 @@ BarWidget {
           columns: 3
           spacing: Style.space(6)
           Repeater {
-            model: root.visualStyles
+            model: root.visualStyles.concat([{ id: "__words", label: "Words" }])
             Button {
               width: (parent.width - parent.spacing * 2) / 3
               text: modelData.label
               leftAlign: true
-              selected: root.visualStyle === modelData.id
+              selected: modelData.id === "__words" ? root.barMode === "track" : (root.visualStyle === modelData.id && root.barMode === "visual")
               foreground: root.bar.foreground
-              onClicked: root.setVisualStyle(modelData.id)
+              onClicked: {
+                if (modelData.id === "__words") root.setBarMode("track")
+                else root.setVisualStyle(modelData.id)
+              }
+            }
+          }
+        }
+        Text {
+          textFormat: Text.PlainText
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.caption
+          color: Qt.darker(root.bar.foreground, 1.4)
+          text: "Spectrum sensitivity"
+        }
+        Row {
+          width: parent.width
+          spacing: Style.space(6)
+          Repeater {
+            model: root.sensOptions
+            Button {
+              width: (parent.width - parent.spacing * 4) / 5
+              text: modelData.label
+              leftAlign: true
+              selected: root.sensitivity === modelData.value
+              foreground: root.bar.foreground
+              onClicked: root.setSensitivity(modelData.value)
             }
           }
         }
