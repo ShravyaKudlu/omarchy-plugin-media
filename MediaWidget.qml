@@ -1466,7 +1466,7 @@ BarWidget {
               font.family: root.bar.fontFamily
               font.pixelSize: Style.font.caption
               color: Qt.darker(root.bar.foreground, 1.4)
-              visible: root.radioView === "favorites" || root.favoriteStations.length > 0
+              visible: root.radioView === "favorites"
               text: "Favorites"
             }
             Text {
@@ -1478,7 +1478,7 @@ BarWidget {
               text: "No favorite stations yet. Star a station to add it here."
             }
             Repeater {
-              model: root.radioView === "favorites" || (root.radioView === "all" && root.searchQuery.trim() === "") ? root.favoriteStations : []
+              model: root.radioView === "favorites" ? root.favoriteStations : []
               Row {
                 width: stationList.width
                 spacing: Style.space(4)
