@@ -9,7 +9,7 @@ Canvas {
   readonly property var styles: [
     "wave", "bars", "bloom", "blocks", "dots", "blob",
     "radar", "tide", "stars", "helix", "aurora", "lightning",
-    "orbit", "particles", "rain", "pulse", "ecg", "waveform"
+    "orbit", "particles", "comet", "pulse", "ecg", "waveform"
   ]
 
   property var barValues: []
@@ -42,11 +42,9 @@ Canvas {
   // Kick recoil: 1 on downbeats, decays; twist surges back through it.
   property real helixRecoil: 0
   property real helixLastKick: -10
-  // Rain streak state: spawn rate, speed, slant follow music; kicks gust.
-  property var rainDrops: []
-  property real rainAcc: 0
-  property real rainFlash: 0
-  property real rainLastKick: -10
+  // Four ball state: independent elastic motion with beat-driven bounce.
+  property var cometBalls: []
+  property real cometLastKick: -10
   // Stars kick flash: 1 per downbeat, decays; sparkles ignite through it.
   property real starFlash: 0
   property real starLastKick: -10
@@ -202,7 +200,7 @@ Canvas {
             + (0.03 + viz.average() * 0.10 + hb * 0.06) * (1 - 2.2 * viz.helixRecoil)
         } catch (e) { viz.helixTwist = viz.helixTwist + 0.03 }
       }
-      if (s === "particles" || s === "blob" || s === "pulse" || s === "rain"
+      if (s === "particles" || s === "blob" || s === "pulse" || s === "comet"
           || s === "ecg" || s === "stars" || s === "aurora" || s === "orbit"
           || s === "helix" || s === "waveform" || s === "dots" || s === "bloom"
           || s === "tide" || s === "lightning")
@@ -246,7 +244,7 @@ Canvas {
       else if (visualStyle === "lightning") paintLightning(ctx)
       else if (visualStyle === "orbit") paintOrbit(ctx)
       else if (visualStyle === "particles") paintParticles(ctx)
-      else if (visualStyle === "rain") paintRain(ctx)
+      else if (visualStyle === "comet") paintComet(ctx)
       else if (visualStyle === "pulse") paintPulse(ctx)
       else if (visualStyle === "ecg") paintEcg(ctx)
       else if (visualStyle === "waveform") paintWaveform(ctx)
@@ -858,16 +856,11 @@ Canvas {
     ctx.fillStyle = foreground
     ctx.strokeStyle = foreground
     ctx.lineCap = "round"
-    // Core: single throbbing heart, biggest in every state by construction.
-    var beadCeil = (0.6 + 1.6) * 1.1 * (0.65 + 0.5 * Math.min(1, oenv * 1.5)) + ofl * 1.5
-    var heartR = Math.max(2.1 + bass * 1.0 + ofl * 1.2, beadCeil * 1.15 + 0.3)
-    ctx.globalAlpha = Math.min(1, 0.58 + 0.20 * avg + ofl * 0.45)
+    // Core: keep the heart clearly dominant over the orbiting beads.
+    var heartR = 2.6 + bass * 1.3 + ofl * 1.5
+    ctx.globalAlpha = Math.min(1, 0.68 + 0.20 * avg + ofl * 0.32)
     ctx.beginPath()
     ctx.arc(cx, cy, heartR, 0, Math.PI * 2)
-    ctx.fill()
-    ctx.globalAlpha = Math.min(1, 0.80 + ofl * 0.20)
-    ctx.beginPath()
-    ctx.arc(cx, cy, 1.7 + bass * 1.2 + ofl * 1.0, 0, Math.PI * 2)
     ctx.fill()
     // Kick front cascades arm to arm, racing faster on drops.
     var kickAge = phase - orbitLastKick
@@ -903,16 +896,21 @@ Canvas {
         var py = cy + Math.sin(a) * rr
         var hv = 0.9 + 0.2 * (Math.abs(Math.sin((r * dots + k) * 12.9898) * 43758.5453) % 1)
         // Beads rest small in silence (smoothed), full size with groove.
-        var bscale = 0.65 + 0.5 * Math.min(1, oenv * 1.5)
+        var bscale = 0.42 + 0.30 * Math.min(1, oenv * 1.5)
         var shimmer = 0.5 + 0.5 * Math.sin(t * 12.0 - (phase - orbitLastKick) * 3.0)
         var dt = t - front
         var glow = (front > -0.5 ? Math.exp(-(dt * dt) / (0.012 + ofl * 0.02)) : 0) * ofl
         ctx.globalAlpha = Math.min(1, (0.30 + 0.40 * (1 - t)) * hv * (0.55 + 0.25 * shimmer) + glow * 0.8)
         ctx.beginPath()
-        ctx.arc(px, py, (0.6 + 1.6 * (1 - t)) * hv * bscale + glow * 1.5, 0, Math.PI * 2)
+        ctx.arc(px, py, (0.45 + 1.05 * (1 - t)) * hv * bscale + glow * 0.9, 0, Math.PI * 2)
         ctx.fill()
       }
     }
+    // Redraw the star above the arms so nearby planets never eclipse it.
+    ctx.globalAlpha = Math.min(1, 0.86 + ofl * 0.14)
+    ctx.beginPath()
+    ctx.arc(cx, cy, 1.9 + bass * 0.9 + ofl * 1.1, 0, Math.PI * 2)
+    ctx.fill()
     ctx.globalAlpha = 1.0
   }
 
@@ -943,51 +941,52 @@ Canvas {
     ctx.globalAlpha = 1.0
   }
 
-  // Rain: slanted streaks; density/speed/slant follow music, kicks gust.
-  function paintRain(ctx) {
+  // Bouncy balls: independent elastic motion with beat-driven impulses.
+  function paintComet(ctx) {
     var avg = average()
     var bass = bassLevel()
-    if (!rainDrops) rainDrops = []
-    var flash = rainFlash || 0
-    try {
-      if (bass > 0.55 && (phase - rainLastKick) > 0.5) {
-        rainLastKick = phase
-        flash = 1
+    if (!cometBalls || cometBalls.length !== 4) {
+      cometBalls = [
+        { x: width * 0.25, y: height * 0.30, vx: 0.42, vy: 0.10, phase: 0.7, bounce: 0 },
+        { x: width * 0.75, y: height * 0.70, vx: -0.36, vy: -0.14, phase: 2.4, bounce: 0 },
+        { x: width * 0.72, y: height * 0.26, vx: -0.24, vy: 0.28, phase: 4.1, bounce: 0 },
+        { x: width * 0.28, y: height * 0.74, vx: 0.30, vy: -0.22, phase: 5.6, bounce: 0 }
+      ]
+    }
+    if (bass > 0.55 && (phase - cometLastKick) > 0.5) {
+      cometLastKick = phase
+      for (var kick = 0; kick < cometBalls.length; kick++) {
+        cometBalls[kick].bounce = 1
+        cometBalls[kick].vy -= 0.22 + bass * 0.18
       }
-    } catch (e) {}
-    flash *= 0.86
-    rainFlash = flash
-    // Music-gated spawn: drizzle in silence, rainfall on drops.
-    rainAcc = (rainAcc || 0) + 0.3 + Math.max(avg, bass) * 2.2
-    while (rainAcc >= 1 && rainDrops.length < 60) {
-      rainAcc -= 1
-      rainDrops.push({
-        x: 1 + Math.random() * (width - 2), y: -2,
-        len: 3 + Math.random() * 3, v: 0.8 + Math.random() * 0.4
-      })
     }
-    if (rainAcc > 4) rainAcc = 4
-    // One shared fall direction: sway + kick gust lean.
-    var tilt = -0.25 + Math.sin(phase * 0.5) * 0.1 + flash * 0.35
-    var dx = Math.sin(tilt), dy = Math.cos(tilt)
-    var fall = 1.0 + avg * 2.0 + flash * 1.5
-    ctx.strokeStyle = foreground
-    ctx.lineWidth = 1.1
-    ctx.lineCap = "round"
-    var next = []
-    for (var i = 0; i < rainDrops.length; i++) {
-      var p = rainDrops[i]
-      p.x += dx * fall * p.v
-      p.y += dy * fall * p.v
-      if (p.y > height + 2 || p.x < -4 || p.x > width + 4) continue
-      if (next.length < 60) next.push(p)
-      ctx.globalAlpha = Math.min(1, 0.25 + 0.5 * Math.min(1, avg + 0.3) + flash * 0.3)
+    ctx.fillStyle = foreground
+    for (var i = 0; i < cometBalls.length; i++) {
+      var c = cometBalls[i]
+      var wander = 0.035 + avg * 0.05
+      c.bounce = (c.bounce || 0) * 0.88
+      c.vx += Math.sin(phase * 0.7 + c.phase) * wander * 0.08
+      c.vy += 0.012 + Math.cos(phase * 0.6 + c.phase) * wander * 0.08
+      var speed = Math.sqrt(c.vx * c.vx + c.vy * c.vy)
+      if (speed > 0.9) { c.vx *= 0.9 / speed; c.vy *= 0.9 / speed }
+      var size = 2.3 + avg * 1.2 + c.bounce * 1.8
+      c.x += c.vx * (1 + avg * 1.8 + c.bounce * 0.9)
+      c.y += c.vy * (1 + avg * 1.8 + c.bounce * 0.9)
+      if (c.x < size || c.x > width - size) {
+        c.x = Math.max(size, Math.min(width - size, c.x))
+        c.vx *= -0.92
+        c.bounce = Math.max(c.bounce, 0.7)
+      }
+      if (c.y < size || c.y > height - size) {
+        c.y = Math.max(size, Math.min(height - size, c.y))
+        c.vy *= -0.92
+        c.bounce = Math.max(c.bounce, 0.7)
+      }
+      ctx.globalAlpha = 0.78 + avg * 0.20 + c.bounce * 0.2
       ctx.beginPath()
-      ctx.moveTo(p.x, p.y)
-      ctx.lineTo(p.x - dx * p.len, p.y - dy * p.len)
-      ctx.stroke()
+      ctx.arc(c.x, c.y, size, 0, Math.PI * 2)
+      ctx.fill()
     }
-    rainDrops = next
     ctx.globalAlpha = 1.0
   }
 

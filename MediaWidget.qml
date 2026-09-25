@@ -23,28 +23,6 @@ BarWidget {
   // Default off: the widget is chatty otherwise (settings IO, cliamp IPC).
   property bool debug: false
   function dbg(msg) { try { if (root.debug) console.log("mystaryo.media: " + msg) } catch (e) {} }
-  // Well-known players, always listed so a favorite can be picked even
-  // before it has ever run. Live-detected apps are appended below these.
-  readonly property var knownPlayers: [
-    { id: "firefox", label: "Firefox / Zen" },
-    { id: "chromium", label: "Chromium / Chrome" },
-    { id: "brave", label: "Brave" },
-    { id: "vivaldi", label: "Vivaldi" },
-    { id: "opera", label: "Opera" },
-    { id: "vlc", label: "VLC" },
-    { id: "spotify", label: "Spotify" },
-    { id: "mpv", label: "mpv" },
-    { id: "rhythmbox", label: "Rhythmbox" },
-    { id: "audacious", label: "Audacious" },
-    { id: "clementine", label: "Clementine" },
-    { id: "strawberry", label: "Strawberry" },
-    { id: "elisa", label: "Elisa" },
-    { id: "lollypop", label: "Lollypop" },
-    { id: "quodlibet", label: "Quod Libet" },
-    { id: "tauon", label: "Tauon" },
-    { id: "amberol", label: "Amberol" },
-    { id: "mpd", label: "MPD" }
-  ]
   function normPlayerId(player) {
     try {
       return String(player.dbusName || "")
@@ -64,40 +42,36 @@ BarWidget {
     } catch (e) {}
     return false
   }
-  // Settings options: Auto first, then the well-known apps (always
-  // visible), then any other live-detected player. A stored pick whose app
-  // isn't running is kept as an "(offline)" row so the choice is never
-  // silently lost.
-  readonly property var musicPlayerOptions: {
-    var opts = [{ id: "auto", label: "Auto (active player)" }]
-    var seen = { "auto": true }
-    var k
-    try {
-      for (k = 0; k < knownPlayers.length; k++) {
-        if (seen[knownPlayers[k].id]) continue
-        seen[knownPlayers[k].id] = true
-        opts.push(knownPlayers[k])
-      }
-      for (var i = 0; i < allPlayers.length; i++) {
-        var p = allPlayers[i]
-        if (root.isCliamp(p)) continue
-        var id = normPlayerId(p)
-        if (id === "" || seen[id]) continue
-        seen[id] = true
-        opts.push({ id: id, label: root.shortLabel(p) })
-      }
-    } catch (e) {}
-    var pref = String(root.musicPlayerPref || "auto").toLowerCase()
-    if (pref !== "" && pref !== "auto" && !seen[pref])
-      opts.push({ id: pref, label: pref + " (offline)" })
-    return opts
-  }
   function setMusicPlayer(id) {
     var v = String(id || "auto").toLowerCase()
     if (v === "") v = "auto"
     if (root.musicPlayerPref === v) return
     root.musicPlayerPref = v
     saveMusicPlayer()
+  }
+  // Every live non-cliamp player, regardless of pref — the Settings
+  // picker model (sourcePlayers above is pref-filtered instead).
+  readonly property var liveAppPlayers: {
+    var pool = []
+    for (var i = 0; i < allPlayers.length; i++) {
+      try { if (!isCliamp(allPlayers[i])) pool.push(allPlayers[i]) } catch (e) {}
+    }
+    return pool
+  }
+  readonly property var musicPlayerOptions: {
+    var options = [{ id: "auto", label: "Auto (active player)" }]
+    var seen = { auto: true }
+    for (var i = 0; i < liveAppPlayers.length; i++) {
+      var player = liveAppPlayers[i]
+      var id = normPlayerId(player)
+      if (id !== "" && !seen[id]) {
+        seen[id] = true
+        options.push({ id: id, label: shortLabel(player) })
+      }
+    }
+    var pref = String(root.musicPlayerPref || "auto").toLowerCase()
+    if (pref !== "auto" && !seen[pref]) options.push({ id: pref, label: pref + " (offline)" })
+    return options
   }
   // Now Playing list: active player under Auto; locked app when present,
   // else Auto fallback so the tab never goes empty.
@@ -127,6 +101,14 @@ BarWidget {
   }
   property int tabIndex: 0 // 0 = now playing, 1 = cliamp, 2 = settings
   property bool popupOpen: false
+  onPopupOpenChanged: {
+    if (!root.popupOpen) {
+      try {
+        if (root.bar && stripButton.tooltipHovered)
+          root.bar.showTooltip(stripButton, stripButton.tooltipText)
+      } catch (e) {}
+    }
+  }
 
   // Blinking search cursor: driven by a timer, not by focus state, so it is
   // visible whenever the cliamp tab is open (focus inside grab popups is
@@ -211,7 +193,7 @@ BarWidget {
     try {
       if (stripIsCliamp()) {
         if (root.cliampTrack !== "") return root.cliampTrack
-        return "cliamp " + (root.cliampState !== "" ? root.cliampState : "…")
+        return "Radio " + (root.cliampState !== "" ? root.cliampState : "…")
       }
       if (root.appPlaying) return appText(true)
       // Idle: the side that played last wins, dimmed — stale titles on
@@ -237,12 +219,6 @@ BarWidget {
     if (!barModeValid(id) || root.barMode === id) return
     root.barMode = id
     saveSettings()
-  }
-  // Tab-0 player switcher jumps straight to a preferred-app lock.
-  function selectPlayer(player) {
-    if (!player) return
-    var id = normPlayerId(player)
-    if (id !== "") setMusicPlayer(id)
   }
   Component.onCompleted: { loadSettings() }
 
@@ -687,7 +663,7 @@ BarWidget {
     })
   }
   function startCliampDaemon(cb) {
-    root.cliampNote = "Starting cliamp…"
+    root.cliampNote = "Starting Radio…"
     if (root.bar) root.bar.run("setsid cliamp -d")
     var tries = 0
     var wait = function() {
@@ -701,7 +677,7 @@ BarWidget {
         } else if (++tries < 10) {
           defer(wait)
         } else {
-          root.cliampNote = "cliamp didn't start."
+          root.cliampNote = "Radio didn't start."
         }
       })
     }
@@ -724,7 +700,7 @@ BarWidget {
     { id: "lightning", label: "Lightning" },
     { id: "orbit", label: "Orbit" },
     { id: "particles", label: "Particles" },
-    { id: "rain", label: "Rain" },
+    { id: "comet", label: "Bounce" },
     { id: "pulse", label: "Pulse" },
     { id: "ecg", label: "ECG" },
     { id: "waveform", label: "Waveform" }
@@ -735,13 +711,13 @@ BarWidget {
       if (visualStyles[i].id === id) return true
     return false
   }
-  // Spectrum sensitivity presets: gain applied in Visualizer.level().
+  // Spectrum sensitivity presets; gain is applied in Visualizer.level().
   readonly property var sensOptions: [
-    { value: 0.6, label: "Chill" },
-    { value: 0.8, label: "Soft" },
+    { value: 0.35, label: "Chill" },
+    { value: 0.65, label: "Soft" },
     { value: 1.0, label: "Normal" },
-    { value: 1.3, label: "Lively" },
-    { value: 1.6, label: "Wild" }
+    { value: 1.5, label: "Lively" },
+    { value: 2.4, label: "Wild" }
   ]
   property real sensitivity: 1.0
   function setSensitivity(v) {
@@ -769,7 +745,8 @@ BarWidget {
           if (v === "flame") v = "helix"
           if (v === "equalizer" || v === "tunnel" || v === "scanner") v = "ecg"
           if (v === "confetti") v = "fireworks"
-          if (v === "fireworks" || v === "comet" || v === "fountain") v = "rain"
+          if (v === "fireworks" || v === "fountain") v = "comet"
+          if (v === "rain") v = "comet"
           if (v === "spikes" || v === "ripple") v = "lightning"
           if (visualStyleValid(v)) {
             root.visualStyle = v
@@ -841,7 +818,7 @@ BarWidget {
     anchors.fill: parent
     bar: root.bar
     text: " "
-    tooltipText: root.stripIsCliamp() ? (root.cliampTrack !== "" ? root.cliampTrack : "cliamp") : (root.selectedPlayer ? ((root.selectedPlayer.trackTitle || "Unknown title") + (root.selectedPlayer.trackArtist ? " — " + root.selectedPlayer.trackArtist : "")) : "Media")
+    tooltipText: root.stripIsCliamp() ? (root.cliampTrack !== "" ? root.cliampTrack : "Radio") : (root.selectedPlayer ? ((root.selectedPlayer.trackTitle || "Unknown title") + (root.selectedPlayer.trackArtist ? " — " + root.selectedPlayer.trackArtist : "")) : "Media")
     onPressed: function(button) { root.barPress(button) }
   }
 
@@ -909,11 +886,11 @@ BarWidget {
     font.family: root.bar.fontFamily
     font.pixelSize: Style.font.body
   }
-  // Single click router used by the strip button: right-click cycles the
-  // visual, left toggles the card.
+  // Single click router used by the strip button: right-click toggles
+  // Words/Spectrum, left toggles the card.
   function barPress(button) {
     if (button === Qt.RightButton) {
-      cycleVisualStyle()
+      root.setBarMode(root.barMode === "track" ? "visual" : "track")
       return
     }
     // Capture the widget's screen position so the card opens below it.
@@ -948,6 +925,15 @@ BarWidget {
     // scrim: click anywhere outside the card dismisses
     MouseArea {
       anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: {
+        var overWidget = root.cardX >= 0
+          && mouseX >= root.cardX - root.width / 2
+          && mouseX <= root.cardX + root.width / 2
+          && mouseY >= root.cardY - root.height
+          && mouseY <= root.cardY
+        return overWidget ? Qt.PointingHandCursor : Qt.ArrowCursor
+      }
       onClicked: root.close()
     }
 
@@ -1035,7 +1021,7 @@ BarWidget {
             id: cliampBtn
             anchors.fill: parent
             iconText: ""
-            text: "cliamp"
+            text: "Radio"
             leftAlign: true
             foreground: root.tabIndex === 1 ? Color.popups.background : root.bar.foreground
             opacity: root.tabIndex === 1 ? 1.0 : 0.8
@@ -1069,23 +1055,6 @@ BarWidget {
         width: parent.width
         spacing: Style.space(6)
         visible: root.tabIndex === 0
-
-        // player switcher
-        Row {
-          width: parent.width
-          spacing: Style.space(4)
-          visible: root.sourcePlayers.length > 1
-          Repeater {
-            model: root.sourcePlayers
-            Button {
-              iconText: ""
-              text: root.shortLabel(modelData)
-              foreground: root.bar.foreground
-              opacity: (root.selectedPlayer === modelData) ? 1.0 : 0.55
-              onClicked: root.selectPlayer(modelData)
-            }
-          }
-        }
 
         Row {
           width: parent.width
@@ -1209,7 +1178,7 @@ BarWidget {
             font.bold: true
             color: root.bar.foreground
             anchors.verticalCenter: parent.verticalCenter
-            text: root.cliampTrack !== "" ? root.cliampTrack : ("cliamp " + root.cliampState)
+            text: root.cliampTrack !== "" ? root.cliampTrack : ("Radio " + root.cliampState)
           }
         }
         Text {
@@ -1220,7 +1189,7 @@ BarWidget {
           font.pixelSize: Style.font.bodySmall
           color: Qt.darker(root.bar.foreground, 1.3)
           visible: !root.cliampUp
-          text: "cliamp daemon not running."
+          text: "Radio daemon not running."
         }
         Row {
           width: parent.width
@@ -1228,25 +1197,25 @@ BarWidget {
           visible: !root.cliampUp
           Button {
             iconText: ""
-            text: "Start cliamp"
+            text: "Start Radio"
             foreground: root.bar.foreground
             onClicked: startCliampDaemon()
           }
           Button {
             iconText: ""
-            text: "Open cliamp"
+            text: "Open Radio"
             foreground: root.bar.foreground
             onClicked: if (root.bar) root.bar.run("xdg-terminal-exec --app-id=org.omarchy.cliamp -e cliamp")
           }
         }
 
-        // search row: field + Search button (transport lives in the header)
+        // search field with inline Search button (transport lives in the header)
         Row {
           width: parent.width
           spacing: Style.space(6)
           visible: root.cliampUp
           Rectangle {
-            width: parent.width - searchBtn.width - parent.spacing
+            width: parent.width
             height: Math.max(searchText.implicitHeight, Style.font.bodySmall) + Style.space(8)
             radius: 6
             color: "transparent"
@@ -1255,7 +1224,10 @@ BarWidget {
             Text {
               id: searchText
               anchors.fill: parent
-              anchors.margins: Style.space(4)
+              anchors.leftMargin: Style.space(4)
+              anchors.topMargin: Style.space(4)
+              anchors.bottomMargin: Style.space(4)
+              anchors.rightMargin: searchBtn.width + Style.space(4)
               verticalAlignment: Text.AlignVCenter
               textFormat: Text.PlainText
               color: root.searchQuery !== "" ? root.bar.foreground : Qt.darker(root.bar.foreground, 1.8)
@@ -1273,17 +1245,21 @@ BarWidget {
                 root.tabIndex = 1
               }
             }
-          }
-          Button {
-            id: searchBtn
-            iconText: ""
-            iconSize: Style.font.body
-            foreground: root.bar.foreground
-            enabled: !root.searchBusy
-            opacity: enabled ? 1.0 : 0.5
-            onClicked: {
-              try { keyCatcher.forceActiveFocus() } catch (e) {}
-              try { root.runSearch() } catch (e2) { root.searchBusy = false; root.cliampNote = "Search failed." }
+            Button {
+              id: searchBtn
+              anchors.right: parent.right
+              anchors.rightMargin: Style.space(2)
+              anchors.verticalCenter: parent.verticalCenter
+              iconText: ""
+              iconSize: Style.font.body
+              foreground: root.bar.foreground
+              enabled: !root.searchBusy
+              opacity: enabled ? 1.0 : 0.5
+              z: 1
+              onClicked: {
+                try { keyCatcher.forceActiveFocus() } catch (e) {}
+                try { root.runSearch() } catch (e2) { root.searchBusy = false; root.cliampNote = "Search failed." }
+              }
             }
           }
         }
@@ -1345,19 +1321,6 @@ BarWidget {
           }
         }
 
-        Button {
-          iconText: ""
-          text: "✕ Clear search"
-          foreground: root.bar.foreground
-          opacity: 0.7
-          visible: root.cliampUp && root.searchQuery.trim() !== ""
-          onClicked: {
-            root.searchQuery = ""
-            root.searchRows = []
-            root.cliampNote = ""
-          }
-        }
-
         Text {
           textFormat: Text.PlainText
           width: parent.width
@@ -1380,7 +1343,7 @@ BarWidget {
           font.family: root.bar.fontFamily
           font.pixelSize: Style.font.caption
           color: Qt.darker(root.bar.foreground, 1.4)
-          text: "Bar visual (right-click bar also cycles)"
+          text: "Bar visual (right-click toggles Words/Spectrum)"
         }
         Grid {
           width: parent.width
@@ -1417,7 +1380,7 @@ BarWidget {
               width: (parent.width - parent.spacing * 4) / 5
               text: modelData.label
               leftAlign: true
-              selected: root.sensitivity === modelData.value
+              selected: Math.abs(root.sensitivity - modelData.value) < 0.01
               foreground: root.bar.foreground
               onClicked: root.setSensitivity(modelData.value)
             }
@@ -1428,32 +1391,23 @@ BarWidget {
           font.family: root.bar.fontFamily
           font.pixelSize: Style.font.caption
           color: Qt.darker(root.bar.foreground, 1.4)
-          text: "Music player"
-        }
-        Text {
-          textFormat: Text.PlainText
-          width: parent.width
-          wrapMode: Text.WordWrap
-          font.family: root.bar.fontFamily
-          font.pixelSize: Style.font.caption
-          color: Qt.darker(root.bar.foreground, 1.6)
-          text: "Now Playing follows this app. Auto follows whichever player is active — pick one to lock it in."
+          text: "Now Playing source"
         }
         Flickable {
           width: parent.width
-          height: Math.min(playerList.implicitHeight, Style.space(220))
+          height: Math.min(playerOptionsColumn.implicitHeight, Style.space(140))
           contentWidth: width
-          contentHeight: playerList.implicitHeight
+          contentHeight: playerOptionsColumn.implicitHeight
           clip: true
           flickableDirection: Flickable.VerticalFlick
           Column {
-            id: playerList
+            id: playerOptionsColumn
             width: parent.width
             spacing: Style.space(4)
             Repeater {
               model: root.musicPlayerOptions
               Button {
-                width: parent.width
+                width: playerOptionsColumn.width
                 text: modelData.label
                 leftAlign: true
                 selected: root.musicPlayerPref === modelData.id

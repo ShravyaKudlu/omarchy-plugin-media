@@ -4,7 +4,7 @@ Always-on 60fps cava spectrum in the Omarchy bar. The strip is a stock
 `WidgetButton`, so hover tooltip, pointing-hand cursor, and click routing
 behave exactly like the built-in widgets. Hover shows the playing track in a
 pill below the bar (title — artist). Left-click opens a three-tab popup,
-right-click cycles the visual style.
+right-click toggles Words/Spectrum.
 
 ![Settings tab](preview-settings.png)
 ![cliamp tab](preview-cliamp.png)
@@ -28,8 +28,9 @@ right-click cycles the visual style.
 ## Bar visuals (18)
 
 Wave (default), Bars, Bloom, Blocks, Dots, Blob, Radar, Tide, Stars, Helix,
-Aurora, Lightning, Orbit, Particles, Rain, Pulse (beat-shatter tiles),
-ECG, Waveform. Pick in the gear tab or right-click the strip to cycle.
+Aurora, Lightning, Orbit, Particles, Bounce (four beat-reactive bouncing balls),
+Pulse (beat-shatter tiles),
+ECG, Waveform. Pick in the gear tab; right-click toggles Words/Spectrum.
 
 ## Files
 
