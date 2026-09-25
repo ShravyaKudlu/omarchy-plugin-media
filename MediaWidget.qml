@@ -357,9 +357,12 @@ BarWidget {
   // ---- cava spectrum pipe ----
   readonly property int barCount: 12
   readonly property int barMax: 7
+  readonly property var fpsOptions: [10, 15, 20, 30, 60]
+  property int visualFps: 30
   property var barValues: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
   property bool cavaDead: false
   property int cavaRestarts: 0
+  property bool cavaRestartRequested: false
 
   readonly property string cavaConf: {
     var u = Qt.resolvedUrl("cava.conf").toString()
@@ -367,30 +370,26 @@ BarWidget {
     try { return decodeURIComponent(u) } catch (e) { return u }
   }
   function parseFrame(line) {
-    // cava 0.10 raw ascii emits the full FFT (~1024 bins per frame), not
-    // bars_number values: downsample by taking the PEAK of each group.
-    // Averaging would dilute a narrow kick drum 85:1 into flatness — peak
-    // keeps transients and bass punching through.
+    // Cava emits the full FFT; downsample each group to the display bars.
     try {
       var parts = String(line).split(";")
-      var vals = []
+      var count = 0
       for (var i = 0; i < parts.length; i++) {
-        if (parts[i] === "") continue
-        var v = parseInt(parts[i], 10)
-        if (isNaN(v) || v < 0) v = 0
-        if (v > root.barMax) v = root.barMax
-        vals.push(v)
+        if (parts[i] !== "") count++
       }
-      if (vals.length < root.barCount) return // partial flush line: keep previous
-      var per = Math.floor(vals.length / root.barCount)
+      if (count < root.barCount) return
+      var per = Math.floor(count / root.barCount)
       var out = []
+      var pos = 0
       for (var b = 0; b < root.barCount; b++) {
         var m = 0
         for (var k = 0; k < per; k++) {
-          var vv = vals[b * per + k]
-          if (vv > m) m = vv
+          while (pos < parts.length && parts[pos] === "") pos++
+          var v = parseInt(parts[pos++], 10)
+          if (isNaN(v) || v < 0) v = 0
+          if (v > m) m = v
         }
-        out.push(m)
+        out.push(m > root.barMax ? root.barMax : m)
       }
       root.barValues = out
     } catch (e) { /* keep previous frame, never crash on junk */ }
@@ -401,7 +400,7 @@ BarWidget {
   // orphaned by earlier hot-reloads (two writers interleave bytes = flat bars).
   Process {
     id: cavaProc
-    command: ["sh", "-c", "F=/tmp/mystaryo-media-cava.fifo; [ -p \"$F\" ] || mkfifo \"$F\"; fuser -k \"$F\" 2>/dev/null; M=$(pactl get-default-sink).monitor; parecord --device=\"$M\" --format=s16le --rate=48000 --channels=2 --latency-msec=50 --process-time-msec=20 --raw \"$F\" & REC=$!; trap \"kill $REC 2>/dev/null\" EXIT; cava -p \"" + root.cavaConf + "\""]
+    command: ["sh", "-c", "F=/tmp/mystaryo-media-cava.fifo; [ -p \"$F\" ] || mkfifo \"$F\"; fuser -k \"$F\" 2>/dev/null; M=$(pactl get-default-sink).monitor; parecord --device=\"$M\" --format=s16le --rate=48000 --channels=2 --latency-msec=50 --process-time-msec=20 --raw \"$F\" & REC=$!; trap \"kill $REC 2>/dev/null\" EXIT; sed 's/^framerate = .*/framerate = " + root.visualFps + "/' \"" + root.cavaConf + "\" | cava -p /dev/stdin"]
     running: !root.cavaDead
     stdout: SplitParser {
       splitMarker: "\n"
@@ -409,6 +408,12 @@ BarWidget {
     }
     stderr: StdioCollector { waitForEnd: false }
     onExited: {
+      if (root.cavaRestartRequested) {
+        root.cavaRestartRequested = false
+        root.cavaRestarts = 0
+        restartTimer.restart()
+        return
+      }
       // Supervisor: restart with backoff, give up after 5 tries (flat bars).
       if (root.cavaRestarts >= 5) { root.cavaDead = true; return }
       root.cavaRestarts++
@@ -706,6 +711,7 @@ BarWidget {
     { id: "waveform", label: "Waveform" }
   ]
   property string visualStyle: "blocks"
+  property bool settingsLoaded: false
   function visualStyleValid(id) {
     for (var i = 0; i < visualStyles.length; i++)
       if (visualStyles[i].id === id) return true
@@ -733,10 +739,25 @@ BarWidget {
   function settingsPath() {
     try { return (Quickshell.env("HOME") || "") + "/.config/omarchy/mystaryo.media.json" } catch (e) { return "" }
   }
+  function setVisualFps(v) {
+    var n = Number(v)
+    if (fpsOptions.indexOf(n) < 0 || root.visualFps === n) return
+    root.visualFps = n
+    saveSettings()
+    try {
+      root.cavaRestartRequested = true
+      cavaProc.running = false
+      restartTimer.restart()
+    } catch (e) {}
+  }
   function loadSettings() {
     var p = settingsPath()
-    if (p === "") return
+    if (p === "") {
+      root.settingsLoaded = true
+      return
+    }
     runCmd(["python3", "-c", "import sys; p=sys.argv[1];\ntry:\n print(open(p).read())\nexcept Exception:\n print('{}')", p], function(out) {
+      root.settingsLoaded = true
       try {
         var j = JSON.parse(out)
         if (!j) return
@@ -763,6 +784,15 @@ BarWidget {
           root.sensitivity = sn
           try { vizCanvas.requestPaint() } catch (e) {}
         }
+        if (typeof j.visualFps === "number" && fpsOptions.indexOf(j.visualFps) >= 0
+            && root.visualFps !== j.visualFps) {
+          root.visualFps = j.visualFps
+          try {
+            root.cavaRestartRequested = true
+            cavaProc.running = false
+            restartTimer.restart()
+          } catch (e) {}
+        }
         if (typeof j.barMode === "string" && barModeValid(j.barMode)) {
           root.barMode = j.barMode
         }
@@ -776,8 +806,8 @@ BarWidget {
   }
   function saveSettings() {
     var p = settingsPath()
-    if (p === "") return
-    runCmd(["python3", "-c", "import json,os,sys; p=sys.argv[1]; s=sys.argv[2]; m=sys.argv[3]; g=sys.argv[4]; b=sys.argv[5]; t=sys.argv[6]; a=sys.argv[7]; ls=sys.argv[8];\nd={}\ntry:\n d=json.load(open(p))\nexcept Exception:\n d={}\nif not isinstance(d, dict):\n d={}\nd['visualStyle']=s;\nd['musicPlayer']=m;\ntry:\n d['sensitivity']=float(g)\nexcept Exception:\n pass\nd['barMode']=b;\nd['lastTitle']=t;\nd['lastArtist']=a;\nd['lastSource']=ls;\nos.makedirs(os.path.dirname(p), exist_ok=True);\nopen(p,'w').write(json.dumps(d))", p, root.visualStyle, root.musicPlayerPref, String(root.sensitivity), root.barMode, root.lastTitle, root.lastArtist, root.lastSource], null)
+    if (p === "" || !root.settingsLoaded) return
+    runCmd(["python3", "-c", "import json,os,sys; p=sys.argv[1]; s=sys.argv[2]; m=sys.argv[3]; g=sys.argv[4]; b=sys.argv[5]; t=sys.argv[6]; a=sys.argv[7]; ls=sys.argv[8]; f=sys.argv[9];\nd={}\ntry:\n d=json.load(open(p))\nexcept Exception:\n d={}\nif not isinstance(d, dict):\n d={}\nd['visualStyle']=s;\nd['musicPlayer']=m;\ntry:\n d['sensitivity']=float(g)\nexcept Exception:\n pass\nd['barMode']=b;\nd['lastTitle']=t;\nd['lastArtist']=a;\nd['lastSource']=ls;\nd['visualFps']=int(f);\nos.makedirs(os.path.dirname(p), exist_ok=True);\nopen(p,'w').write(json.dumps(d))", p, root.visualStyle, root.musicPlayerPref, String(root.sensitivity), root.barMode, root.lastTitle, root.lastArtist, root.lastSource, String(root.visualFps)], null)
   }
   function saveMusicPlayer() {
     saveSettings()
@@ -835,6 +865,7 @@ BarWidget {
     foreground: root.bar.barForeground
     visualStyle: root.visualStyle
     sensitivity: root.sensitivity
+    frameRate: root.visualFps
   }
   // Now-playing track row (barMode "track"): transport + elided title.
   // Text clicks open the popup like the rest of the strip.
@@ -1383,6 +1414,28 @@ BarWidget {
               selected: Math.abs(root.sensitivity - modelData.value) < 0.01
               foreground: root.bar.foreground
               onClicked: root.setSensitivity(modelData.value)
+            }
+          }
+        }
+        Text {
+          textFormat: Text.PlainText
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.caption
+          color: Qt.darker(root.bar.foreground, 1.4)
+          text: "Visualizer FPS"
+        }
+        Row {
+          width: parent.width
+          spacing: Style.space(6)
+          Repeater {
+            model: root.fpsOptions
+            Button {
+              width: (parent.width - parent.spacing * (root.fpsOptions.length - 1)) / root.fpsOptions.length
+              text: modelData + " FPS"
+              leftAlign: true
+              selected: root.visualFps === modelData
+              foreground: root.bar.foreground
+              onClicked: root.setVisualFps(modelData)
             }
           }
         }

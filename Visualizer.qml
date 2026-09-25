@@ -18,6 +18,7 @@ Canvas {
   property color foreground: "transparent"
   property string visualStyle: "wave"
   property bool dead: false
+  property int frameRate: 30
   // Display gain from the sensitivity setting (0.6 calm .. 1.6 wild).
   property real sensitivity: 1.0
 
@@ -77,13 +78,22 @@ Canvas {
   property real tideFlash: 0
   property real blobPhase: 0
 
-  onBarValuesChanged: viz.requestPaint()
+  onBarValuesChanged: {
+    if (!viz.isAnimatedStyle(viz.visualStyle)) viz.requestPaint()
+  }
   onVisualStyleChanged: viz.requestPaint()
 
-  // Motion clock (~60fps) for the motion styles: cava-fed styles repaint on
+  function isAnimatedStyle(s) {
+    return s === "particles" || s === "blob" || s === "pulse" || s === "comet"
+      || s === "ecg" || s === "stars" || s === "aurora" || s === "orbit"
+      || s === "helix" || s === "waveform" || s === "dots" || s === "bloom"
+      || s === "tide" || s === "lightning"
+  }
+
+  // Motion clock (~30fps) for the motion styles: cava-fed styles repaint on
   // each audio frame; the others keep animating in silence.
   Timer {
-    interval: 16
+    interval: Math.max(16, Math.round(1000 / Math.max(1, viz.frameRate)))
     repeat: true
     running: viz.visible && !viz.dead
     onTriggered: {
@@ -200,10 +210,7 @@ Canvas {
             + (0.03 + viz.average() * 0.10 + hb * 0.06) * (1 - 2.2 * viz.helixRecoil)
         } catch (e) { viz.helixTwist = viz.helixTwist + 0.03 }
       }
-      if (s === "particles" || s === "blob" || s === "pulse" || s === "comet"
-          || s === "ecg" || s === "stars" || s === "aurora" || s === "orbit"
-          || s === "helix" || s === "waveform" || s === "dots" || s === "bloom"
-          || s === "tide" || s === "lightning")
+      if (viz.isAnimatedStyle(s))
         viz.requestPaint()
     }
   }
