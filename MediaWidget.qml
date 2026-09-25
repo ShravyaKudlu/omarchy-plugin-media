@@ -482,13 +482,17 @@ BarWidget {
   property bool cliampUp: false
   property string cliampState: ""
   property string cliampTrack: ""
+  property var cliampStation: ({ label: "", path: "" })
   // Edge memory for the exclusion watch: first snapshot only records.
   property bool prevCliampPlaying: false
   property bool cliampKnown: false
   property var searchRows: []
   property string cliampNote: ""
   property string searchQuery: ""
+  property string radioView: "all"
   property var playCounts: ({}) // normalized station key -> play count (history)
+  property var favoriteStations: []
+  property var recentStations: []
 
   // "Radio Mirchi Hindi [128k] · India" -> "radio mirchi hindi"
   function normKey(s) {
@@ -504,16 +508,51 @@ BarWidget {
   function loadPlayCounts() {
     cliampCall("runtime.history", { limit: 100 }, function(res) {
       var counts = {}
+      var recent = []
+      var seen = {}
       try {
         var h = (res && res.history) || []
         for (var i = 0; i < h.length; i++) {
           var t = (h[i] && h[i].track) || {}
-          var k = normKey(t.station || t.title)
+          var label = String(t.station || t.title || t.name || "")
+          var path = String(t.path || t.url || t.stream || "")
+          var k = normKey(label)
           if (k !== "") counts[k] = (counts[k] || 0) + 1
+          if (label !== "" && path !== "" && !seen[k]) {
+            seen[k] = true
+            recent.push({ label: label, path: path })
+          }
         }
       } catch (e) {}
       root.playCounts = counts
+      root.recentStations = recent.slice(0, 30)
     })
+  }
+  function isFavorite(station) {
+    var key = normKey(station && station.label)
+    for (var i = 0; i < favoriteStations.length; i++)
+      if (normKey(favoriteStations[i].label) === key) return true
+    return false
+  }
+  function toggleFavorite(station) {
+    if (!station || !station.label || !station.path) return
+    var next = []
+    var key = normKey(station.label)
+    var removed = false
+    for (var i = 0; i < favoriteStations.length; i++) {
+      if (normKey(favoriteStations[i].label) === key) {
+        removed = true
+        continue
+      }
+      next.push(favoriteStations[i])
+    }
+    if (!removed) next.push({ label: String(station.label), path: String(station.path) })
+    favoriteStations = next.slice(-30)
+    saveSettings()
+  }
+  function stationFromSearchRow(row) {
+    var ref = row && row.ref ? row.ref : {}
+    return { label: String(row && row.label || ""), path: String(ref.path || ref.url || ref.stream || "") }
   }
 
   // Fixed curated top-12 with direct stream URLs (from
@@ -540,6 +579,7 @@ BarWidget {
       root.cliampUp = false
       root.cliampState = ""
       root.cliampTrack = ""
+      root.cliampStation = ({ label: "", path: "" })
       root.prevCliampPlaying = false
       return
     }
@@ -547,7 +587,10 @@ BarWidget {
     root.cliampState = String(snap.state || "")
     try {
       var lt = snap.logical_track || {}
-      root.cliampTrack = String(lt.title || lt.path || "")
+      var label = String(lt.title || lt.station || lt.path || "")
+      var path = String(lt.path || lt.url || lt.stream || "")
+      root.cliampTrack = label
+      root.cliampStation = { label: label, path: path }
     } catch (e) { root.cliampTrack = "" }
     // Rising edge only: cliamp started -> app yields + owns the strip.
     // First snapshot only records, so a pre-playing daemon never
@@ -630,7 +673,7 @@ BarWidget {
     root.searchBusy = true
     root.searchRows = []
     root.cliampNote = "Searching…"
-    cliampCall("provider.search", { provider: "radio", query: q, offset: 0, limit: 20 }, function(res) {
+    cliampCall("provider.search", { provider: "radio", query: q, offset: 0, limit: 50 }, function(res) {
       root.dbg("search callback res=" + (res === null ? "null" : "ok"))
       root.searchBusy = false
       if (res === null) {
@@ -801,13 +844,14 @@ BarWidget {
         if (typeof j.lastSource === "string" && (j.lastSource === "app" || j.lastSource === "cliamp")) {
           root.lastSource = j.lastSource
         }
+        if (Array.isArray(j.favoriteStations)) root.favoriteStations = j.favoriteStations.slice(0, 30)
       } catch (e) {}
     })
   }
   function saveSettings() {
     var p = settingsPath()
     if (p === "" || !root.settingsLoaded) return
-    runCmd(["python3", "-c", "import json,os,sys; p=sys.argv[1]; s=sys.argv[2]; m=sys.argv[3]; g=sys.argv[4]; b=sys.argv[5]; t=sys.argv[6]; a=sys.argv[7]; ls=sys.argv[8]; f=sys.argv[9];\nd={}\ntry:\n d=json.load(open(p))\nexcept Exception:\n d={}\nif not isinstance(d, dict):\n d={}\nd['visualStyle']=s;\nd['musicPlayer']=m;\ntry:\n d['sensitivity']=float(g)\nexcept Exception:\n pass\nd['barMode']=b;\nd['lastTitle']=t;\nd['lastArtist']=a;\nd['lastSource']=ls;\nd['visualFps']=int(f);\nos.makedirs(os.path.dirname(p), exist_ok=True);\nopen(p,'w').write(json.dumps(d))", p, root.visualStyle, root.musicPlayerPref, String(root.sensitivity), root.barMode, root.lastTitle, root.lastArtist, root.lastSource, String(root.visualFps)], null)
+    runCmd(["python3", "-c", "import json,os,sys; p=sys.argv[1]; s=sys.argv[2]; m=sys.argv[3]; g=sys.argv[4]; b=sys.argv[5]; t=sys.argv[6]; a=sys.argv[7]; ls=sys.argv[8]; f=sys.argv[9]; fav=sys.argv[10];\nd={}\ntry:\n d=json.load(open(p))\nexcept Exception:\n d={}\nif not isinstance(d, dict):\n d={}\nd['visualStyle']=s;\nd['musicPlayer']=m;\ntry:\n d['sensitivity']=float(g)\nexcept Exception:\n pass\nd['barMode']=b;\nd['lastTitle']=t;\nd['lastArtist']=a;\nd['lastSource']=ls;\nd['visualFps']=int(f);\ntry:\n d['favoriteStations']=json.loads(fav)\nexcept Exception:\n pass\nos.makedirs(os.path.dirname(p), exist_ok=True);\nopen(p,'w').write(json.dumps(d))", p, root.visualStyle, root.musicPlayerPref, String(root.sensitivity), root.barMode, root.lastTitle, root.lastArtist, root.lastSource, String(root.visualFps), JSON.stringify(root.favoriteStations)], null)
   }
   function saveMusicPlayer() {
     saveSettings()
@@ -1202,7 +1246,7 @@ BarWidget {
           }
           Text {
             textFormat: Text.PlainText
-            width: parent.width - cliampToggle.width - parent.spacing
+            width: parent.width - cliampToggle.width - cliampFavorite.width - parent.spacing * 2
             elide: Text.ElideRight
             font.family: root.bar.fontFamily
             font.pixelSize: Style.font.body
@@ -1210,6 +1254,14 @@ BarWidget {
             color: root.bar.foreground
             anchors.verticalCenter: parent.verticalCenter
             text: root.cliampTrack !== "" ? root.cliampTrack : ("Radio " + root.cliampState)
+          }
+          Button {
+            id: cliampFavorite
+            width: Style.space(30)
+            iconText: root.isFavorite(root.cliampStation) ? "★" : "☆"
+            foreground: root.bar.foreground
+            enabled: root.cliampStation.path !== ""
+            onClicked: root.toggleFavorite(root.cliampStation)
           }
         }
         Text {
@@ -1239,12 +1291,43 @@ BarWidget {
             onClicked: if (root.bar) root.bar.run("xdg-terminal-exec --app-id=org.omarchy.cliamp -e cliamp")
           }
         }
+        Row {
+          width: parent.width
+          spacing: Style.space(6)
+          Button {
+            width: (parent.width - parent.spacing) / 2
+            text: root.radioView === "favorites" ? "All stations" : "★ Favorites"
+            foreground: root.bar.foreground
+            onClicked: {
+              root.radioView = root.radioView === "favorites" ? "all" : "favorites"
+              if (root.radioView !== "all") {
+                root.searchQuery = ""
+                root.searchRows = []
+                root.cliampNote = ""
+              }
+            }
+          }
+          Button {
+            width: (parent.width - parent.spacing) / 2
+            text: root.radioView === "recent" ? "All stations" : "Recently played"
+            foreground: root.bar.foreground
+            onClicked: {
+              root.radioView = root.radioView === "recent" ? "all" : "recent"
+              if (root.radioView !== "all") {
+                root.searchQuery = ""
+                root.searchRows = []
+                root.cliampNote = ""
+                root.loadPlayCounts()
+              }
+            }
+          }
+        }
 
         // search field with inline Search button (transport lives in the header)
         Row {
           width: parent.width
           spacing: Style.space(6)
-          visible: root.cliampUp
+          visible: root.cliampUp && root.radioView === "all"
           Rectangle {
             width: parent.width
             height: Math.max(searchText.implicitHeight, Style.font.bodySmall) + Style.space(8)
@@ -1311,14 +1394,26 @@ BarWidget {
             spacing: Style.space(4)
 
             Repeater {
-              model: root.searchQuery.trim() !== "" ? root.searchRows : []
-              Button {
-                iconText: "⏵"
+              model: root.radioView === "all" && root.searchQuery.trim() !== "" ? root.searchRows : []
+              Row {
                 width: stationList.width
-                leftAlign: true
-                text: (modelData ? modelData.label : "")
-                foreground: root.bar.foreground
-                onClicked: root.playSearchRow(modelData)
+                spacing: Style.space(4)
+                Button {
+                  iconText: "⏵"
+                  width: parent.width - favoriteSearch.width - parent.spacing
+                  leftAlign: true
+                  text: (modelData ? modelData.label : "")
+                  foreground: root.bar.foreground
+                  onClicked: root.playSearchRow(modelData)
+                }
+                Button {
+                  id: favoriteSearch
+                  width: Style.space(30)
+                  text: root.isFavorite(root.stationFromSearchRow(modelData)) ? "★" : "☆"
+                  foreground: root.bar.foreground
+                  enabled: root.stationFromSearchRow(modelData).path !== ""
+                  onClicked: root.toggleFavorite(root.stationFromSearchRow(modelData))
+                }
               }
             }
             Text {
@@ -1326,7 +1421,7 @@ BarWidget {
               font.family: root.bar.fontFamily
               font.pixelSize: Style.font.caption
               color: Qt.darker(root.bar.foreground, 1.4)
-              visible: root.searchQuery.trim() !== "" && root.searchRows.length === 0 && root.cliampNote === ""
+              visible: root.radioView === "all" && root.searchQuery.trim() !== "" && root.searchRows.length === 0 && root.cliampNote === ""
               text: "Type a name or country, then Search."
             }
 
@@ -1335,18 +1430,94 @@ BarWidget {
               font.family: root.bar.fontFamily
               font.pixelSize: Style.font.caption
               color: Qt.darker(root.bar.foreground, 1.4)
-              visible: root.searchQuery.trim() === ""
+              visible: root.radioView === "all" && root.searchQuery.trim() === ""
               text: "Top 12 streams"
             }
+            Text {
+              textFormat: Text.PlainText
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+              color: Qt.darker(root.bar.foreground, 1.4)
+              visible: root.radioView === "favorites" || root.favoriteStations.length > 0
+              text: "Favorites"
+            }
+            Text {
+              textFormat: Text.PlainText
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+              color: Qt.darker(root.bar.foreground, 1.4)
+              visible: root.radioView === "favorites" && root.favoriteStations.length === 0
+              text: "No favorite stations yet. Star a station to add it here."
+            }
             Repeater {
-              model: root.searchQuery.trim() === "" ? root.topStations : []
+              model: root.radioView === "favorites" || (root.radioView === "all" && root.searchQuery.trim() === "") ? root.favoriteStations : []
+              Row {
+                width: stationList.width
+                spacing: Style.space(4)
+                Button {
+                  iconText: "⏵"
+                  width: parent.width - favoriteTop.width - parent.spacing
+                  leftAlign: true
+                  text: modelData.label
+                  foreground: root.bar.foreground
+                  onClicked: root.playStation(modelData)
+                }
+                Button {
+                  id: favoriteTop
+                  width: Style.space(30)
+                  text: "★"
+                  foreground: root.bar.foreground
+                  onClicked: root.toggleFavorite(modelData)
+                }
+              }
+            }
+            Text {
+              textFormat: Text.PlainText
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+              color: Qt.darker(root.bar.foreground, 1.4)
+              visible: root.radioView === "recent"
+              text: "Recently played"
+            }
+            Text {
+              textFormat: Text.PlainText
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+              color: Qt.darker(root.bar.foreground, 1.4)
+              visible: root.radioView === "recent" && root.recentStations.length === 0
+              text: "No recently played stations."
+            }
+            Repeater {
+              model: root.radioView === "recent" ? root.recentStations : []
               Button {
-                iconText: ""
+                iconText: "↻"
                 width: stationList.width
                 leftAlign: true
-                text: ((index + 1) + ".  " + (modelData && modelData.label ? modelData.label : ""))
+                text: modelData.label
                 foreground: root.bar.foreground
                 onClicked: root.playStation(modelData)
+              }
+            }
+            Repeater {
+              model: root.radioView === "all" && root.searchQuery.trim() === "" ? root.topStations : []
+              Row {
+                width: stationList.width
+                spacing: Style.space(4)
+                Button {
+                  iconText: ""
+                  width: parent.width - favoriteStream.width - parent.spacing
+                  leftAlign: true
+                  text: ((index + 1) + ".  " + (modelData && modelData.label ? modelData.label : ""))
+                  foreground: root.bar.foreground
+                  onClicked: root.playStation(modelData)
+                }
+                Button {
+                  id: favoriteStream
+                  width: Style.space(30)
+                  text: root.isFavorite(modelData) ? "★" : "☆"
+                  foreground: root.bar.foreground
+                  onClicked: root.toggleFavorite(modelData)
+                }
               }
             }
           }
