@@ -1,20 +1,15 @@
 import QtQuick
 
-// Audio spectrum canvas for mystaryo.media. Renders one of the styles in
-// `styles` (wave by default) from the cava bar values fed via `barValues`.
-//
-// Inputs: barValues (0..barMax per bin), barCount, barMax, foreground
-// (theme color), visualStyle id, dead (audio pipeline down).
-// Everything animation-related lives here: the 50ms motion clock, the
-// per-style state fields, and the level helpers. Styles degrade to wave
-// on any paint error, so a bad frame can never crash the bar.
+// Audio spectrum canvas: one of `styles` (wave default) from cava barValues.
+// Inputs: barValues 0..barMax, barCount, barMax, foreground, visualStyle, dead.
+// Paint errors degrade to wave — a bad frame can never crash the bar.
 Canvas {
   id: viz
 
   readonly property var styles: [
     "wave", "bars", "bloom", "blocks", "dots", "blob",
-    "radar", "tide", "stars", "flame", "aurora", "spikes",
-    "orbit", "particles", "confetti", "pulse", "equalizer", "waveform"
+    "radar", "tide", "stars", "helix", "aurora", "lightning",
+    "orbit", "particles", "rain", "pulse", "ecg", "waveform"
   ]
 
   property var barValues: []
@@ -28,11 +23,59 @@ Canvas {
   property real phase: 0
   // Per-style scratch state, lazily seeded by the painters that need it.
   property var particles: []
-  property var peaks: []
   property real pulseEnv: 0
   property real pulseFlash: 0
   property real pulseLastBeat: -10
-  property var waveHist: []
+  // Spectrogram history (newest last): music-gated scroll + kick flash.
+  property var specHist: []
+  property real specAcc: 0
+  property real specFlash: 0
+  property real specLastKick: -10
+  // Auto-gain ceiling: quiet passages bloom, never murky.
+  property real specMax: 0
+  // ECG sweep 0..1, incremental so speed glides with the music.
+  property real ecgHead: 0
+  // Helix twist angle, incremental: faster when loud.
+  property real helixTwist: 0
+  // Kick recoil: 1 on downbeats, decays; twist surges back through it.
+  property real helixRecoil: 0
+  property real helixLastKick: -10
+  // Rain streak state: spawn rate, speed, slant follow music; kicks gust.
+  property var rainDrops: []
+  property real rainAcc: 0
+  property real rainFlash: 0
+  property real rainLastKick: -10
+  // Stars kick flash: 1 per downbeat, decays; sparkles ignite through it.
+  property real starFlash: 0
+  property real starLastKick: -10
+  // Starfield lifecycle: positions + ages; old stars reborn elsewhere.
+  property var starPos: []
+  property var starAge: []
+  // Lightning flash: white-out on every downbeat, fast decay.
+  property real lightFlash: 0
+  property real lightLastKick: -10
+  // Strike mode 0 jagged / 2 spear + flow dir; rolled per strike.
+  property int lightMode: 0
+  property int lightModeLeft: 0
+  property real lightTilt: 0
+  property int lightFlow: 1
+  // Orbit spin (incremental whirl) + kick flash/front + groove envelope.
+  property real orbitSpin: 0
+  property real orbitFlash: 0
+  property real orbitLastKick: -10
+  property real orbitEnv: 0
+  // Dots spring memory: one position + velocity per dot.
+  property var dotY: []
+  property var dotV: []
+  // Tide offsets + spring recoil (kicks knock back, spring returns).
+  property var tideOff: [0, 0]
+  property real tideRD: 0
+  property real tideRV: 0
+  property real tideLastKick: -10
+  // Groove envelope (fast attack, slow release) + kick flash.
+  property real tideEnv: 0
+  property real tideFlash: 0
+  property real blobPhase: 0
 
   onBarValuesChanged: viz.requestPaint()
   onVisualStyleChanged: viz.requestPaint()
@@ -46,18 +89,126 @@ Canvas {
     onTriggered: {
       viz.phase += 0.05
       var s = viz.visualStyle
-      if (s === "particles" || s === "blob" || s === "pulse" || s === "confetti"
-          || s === "equalizer" || s === "stars" || s === "aurora" || s === "orbit"
-          || s === "flame" || s === "waveform" || s === "dots" || s === "bloom"
-          || s === "tide")
+      // ECG head: crawls in silence, races loud (incremental = smooth).
+      if (s === "ecg") {
+        try {
+          viz.ecgHead = (viz.ecgHead + 0.004 + viz.average() * 0.016 + viz.bassLevel() * 0.010) % 1
+        } catch (e) { viz.ecgHead = (viz.ecgHead + 0.004) % 1 }
+      }
+      // Stars kick flash: one clean trigger per downbeat, fast decay.
+      if (s === "stars") {
+        try {
+          if (viz.bassLevel() > 0.55 && (viz.phase - viz.starLastKick) > 0.5) {
+            viz.starLastKick = viz.phase
+            viz.starFlash = 1
+          }
+          viz.starFlash = (viz.starFlash || 0) * 0.88
+        } catch (e) { viz.starFlash = (viz.starFlash || 0) * 0.88 }
+      }
+      // Lightning flash: white-out on every downbeat, fast decay.
+      if (s === "lightning") {
+        try {
+          if (viz.bassLevel() > 0.55 && (viz.phase - viz.lightLastKick) > 0.5) {
+            viz.lightLastKick = viz.phase
+            viz.lightFlash = 1
+          }
+          viz.lightFlash = (viz.lightFlash || 0) * 0.85
+        } catch (e) { viz.lightFlash = (viz.lightFlash || 0) * 0.85 }
+      }
+      // Tide: one shared kick trigger drives recoil + swell; blob breathes slow.
+      if (s === "tide" || s === "blob") {
+        try {
+          var te = Math.max(viz.average(), viz.bassLevel())
+          if (s === "tide") {
+            var tenv = viz.tideEnv || 0
+            tenv += (te - tenv) * (te > tenv ? 0.5 : 0.08)
+            viz.tideEnv = tenv
+            if (te > 0.55 && (viz.phase - viz.tideLastKick) > 0.6) {
+              viz.tideLastKick = viz.phase
+              viz.tideRV = (viz.tideRV || 0) - (0.15 + te * 0.15)
+              viz.tideFlash = 1
+            }
+            viz.tideFlash = (viz.tideFlash || 0) * 0.86
+            var tRx = viz.tideRD || 0, tRv = viz.tideRV || 0
+            tRv += (-0.06 * tRx - 0.14 * tRv)
+            tRx += tRv
+            viz.tideRD = tRx
+            viz.tideRV = tRv
+            for (var to = 0; to < 2; to++)
+              viz.tideOff[to] += (0.028 + tenv * 0.05) * (to === 0 ? 0.55 : 1.55) + tRv
+          } else {
+            viz.blobPhase = viz.blobPhase + 0.05 + te * 0.08
+          }
+        } catch (e) {}
+      }
+      // Orbit: whirl/drift glide with music; shared kick trigger fires pulse.
+      if (s === "orbit") {
+        try {
+          var oe = Math.max(viz.average(), viz.bassLevel())
+          var oenv = viz.orbitEnv || 0
+          oenv += (oe - oenv) * (oe > oenv ? 0.5 : 0.08)
+          viz.orbitEnv = oenv
+          viz.orbitSpin = viz.orbitSpin + 0.02 + oenv * 0.07
+            + (viz.orbitFlash || 0) * 0.05
+          if (viz.bassLevel() > 0.55 && (viz.phase - viz.orbitLastKick) > 0.5) {
+            viz.orbitLastKick = viz.phase
+            viz.orbitFlash = 1
+          }
+          viz.orbitFlash = (viz.orbitFlash || 0) * 0.88
+        } catch (e) { viz.orbitSpin = viz.orbitSpin + 0.02 }
+      }
+      // Waveform history: music-gated snapshots on timer clock only.
+      if (s === "waveform") {
+        try {
+          var se = Math.max(viz.average(), viz.bassLevel())
+          viz.specAcc = (viz.specAcc || 0) + 0.4 + se * 1.6
+          if (viz.specAcc >= 1) {
+            viz.specAcc = 0
+            var snap = []
+            var smx = 0
+            var prev = viz.specHist.length > 0 ? viz.specHist[viz.specHist.length - 1] : null
+            for (var sh = 0; sh < viz.barCount; sh++) {
+              var nv = viz.barValues[sh] || 0
+              var pv = prev ? (prev[sh] || 0) : nv
+              var bv = pv + (nv - pv) * 0.5
+              snap.push(bv)
+              if (bv > smx) smx = bv
+            }
+            var sgm = viz.specMax || 0
+            sgm += (smx - sgm) * (smx > sgm ? 0.5 : 0.02)
+            viz.specMax = sgm
+            viz.specHist.push(snap)
+            while (viz.specHist.length > 38) viz.specHist.shift()
+          }
+          if (viz.bassLevel() > 0.55 && (viz.phase - viz.specLastKick) > 0.5) {
+            viz.specLastKick = viz.phase
+            viz.specFlash = 1
+          }
+          viz.specFlash = (viz.specFlash || 0) * 0.86
+        } catch (e) {}
+      }
+      // Helix: drifts in silence, spins up loud, recoils on kicks.
+      if (s === "helix") {
+        try {
+          var hb = viz.bassLevel()
+          if (hb > 0.55 && (viz.phase - viz.helixLastKick) > 0.6) {
+            viz.helixLastKick = viz.phase
+            viz.helixRecoil = 1
+          }
+          viz.helixRecoil = (viz.helixRecoil || 0) * 0.90
+          viz.helixTwist = viz.helixTwist
+            + (0.03 + viz.average() * 0.10 + hb * 0.06) * (1 - 2.2 * viz.helixRecoil)
+        } catch (e) { viz.helixTwist = viz.helixTwist + 0.03 }
+      }
+      if (s === "particles" || s === "blob" || s === "pulse" || s === "rain"
+          || s === "ecg" || s === "stars" || s === "aurora" || s === "orbit"
+          || s === "helix" || s === "waveform" || s === "dots" || s === "bloom"
+          || s === "tide" || s === "lightning")
         viz.requestPaint()
     }
   }
 
-  // Normalized 0..1 level for bin i. The source is full-scale and cava's
-  // autosens already spans the 0..barMax range, so NO extra display gain.
-  // A 0.7 power curve lifts the mids (where the groove lives) without
-  // touching the ceiling — more visible bounce, same headroom.
+  // Level 0..1 per bin (pow 0.7 lifts mids); cava spans the full range.
   function level(i) {
     try {
       var f = Math.min(1, (barValues[i] || 0) / barMax)
@@ -88,14 +239,14 @@ Canvas {
       else if (visualStyle === "radar") paintRadar(ctx)
       else if (visualStyle === "tide") paintTide(ctx)
       else if (visualStyle === "stars") paintStars(ctx)
-      else if (visualStyle === "flame") paintFlame(ctx)
+      else if (visualStyle === "helix") paintHelix(ctx)
       else if (visualStyle === "aurora") paintAurora(ctx)
-      else if (visualStyle === "spikes") paintSpikes(ctx)
+      else if (visualStyle === "lightning") paintLightning(ctx)
       else if (visualStyle === "orbit") paintOrbit(ctx)
       else if (visualStyle === "particles") paintParticles(ctx)
-      else if (visualStyle === "confetti") paintConfetti(ctx)
+      else if (visualStyle === "rain") paintRain(ctx)
       else if (visualStyle === "pulse") paintPulse(ctx)
-      else if (visualStyle === "equalizer") paintEqualizer(ctx)
+      else if (visualStyle === "ecg") paintEcg(ctx)
       else if (visualStyle === "waveform") paintWaveform(ctx)
       else paintWave(ctx)
     } catch (e) { try { paintWave(ctx) } catch (e2) {} }
@@ -212,35 +363,62 @@ Canvas {
     ctx.globalAlpha = 1.0
   }
 
-  // Mirrored bouncing dots on a faint center line. Sized for a short bar
-  // strip: big radii so motion reads at a glance, plus a gentle idle bob
-  // so silence still looks alive (bob fades out as real levels take over).
+  // Dots: spring beads swinging both ways (ECG-like deviation) with
+  // trails, halos, squash, kick pops. Silence settles to center.
   function paintDots(ctx) {
     var n = barCount
     var mid = height / 2
-    var amp = (height / 2) - 2
-    ctx.globalAlpha = 0.4
+    var amp = (height / 2) - 2.5
+    var bass = bassLevel()
+    var avg = average()
+    if (!dotY || dotY.length !== n || !dotV || dotV.length !== n) {
+      dotY = []
+      dotV = []
+      for (var z = 0; z < n; z++) { dotY.push(mid); dotV.push(0) }
+    }
     ctx.fillStyle = foreground
-    ctx.fillRect(1, mid - 0.75, width - 2, 1.5)
     for (var i = 0; i < n; i++) {
       var f = level(i)
-      var idle = Math.sin(phase * 2 + i * 0.9) * (1 - Math.min(1, f * 1.5)) * 1.6
+      // Swing both ways: deviation from average, clamped to strip.
+      var target = mid - (f - avg) * amp * 2
+      if (target < 2.5) target = 2.5
+      if (target > height - 2.5) target = height - 2.5
+      var v = dotV[i] + (target - dotY[i]) * 0.25
+      v *= 0.70
+      dotV[i] = v
+      var y = dotY[i] + v
+      dotY[i] = y
       var x = 1 + (width - 2) * (n === 1 ? 0.5 : (i / (n - 1)))
-      var y = mid - amp * f + idle
-      var r = 1.5 + 4.5 * f
-      ctx.globalAlpha = 1.0
+        + Math.sin(phase * 1.5 + i * 0.7) * (1 + f * 2)
+      var r = 1.2 + 2.2 * f + bass * 1.0
+      // trail: fading stamps back along the motion
+      var alphas = [0, 0.08, 0.15, 0.25]
+      for (var t = 3; t >= 1; t--) {
+        ctx.globalAlpha = alphas[t]
+        ctx.beginPath()
+        ctx.arc(x, y - v * t, Math.max(0.5, r * (1 - t * 0.22)), 0, Math.PI * 2)
+        ctx.fill()
+      }
+      // halo: soft glow around the bead
+      ctx.globalAlpha = 0.10 + 0.10 * f
       ctx.beginPath()
-      ctx.arc(x, y, r, 0, Math.PI * 2)
+      ctx.arc(x, y, r * 2.1, 0, Math.PI * 2)
       ctx.fill()
-      ctx.globalAlpha = 0.65
+      // squash & stretch along the motion
+      var stretch = 1 + Math.min(0.6, Math.abs(v) * 0.25)
+      ctx.globalAlpha = Math.min(1, 0.55 + 0.45 * f + bass * 0.3)
+      ctx.save()
+      ctx.translate(x, y)
+      ctx.scale(1 / stretch, stretch)
       ctx.beginPath()
-      ctx.arc(x, 2 * mid - y, Math.max(1, r * 0.65), 0, Math.PI * 2)
+      ctx.arc(0, 0, r, 0, Math.PI * 2)
       ctx.fill()
+      ctx.restore()
     }
     ctx.globalAlpha = 1.0
   }
 
-  // Organic blob: radial wobble driven by the spectrum.
+  // Blob: spectrum wobble, breathing slow in silence, quicker loud.
   function paintBlob(ctx) {
     var n = barCount
     var cx = width / 2
@@ -252,8 +430,8 @@ Canvas {
       var a = (s / steps) * Math.PI * 2
       var bin = Math.floor(((s / steps) * n)) % n
       var wobble = level(bin) * base * 0.55
-      // Gentle idle breathing so it never fully freezes in silence.
-      wobble += Math.sin(phase * 2 + s * 1.3) * base * 0.06
+      // Calm musical breathing, never fully frozen.
+      wobble += Math.sin(blobPhase + s * 1.3) * base * 0.06
       var r = base * 0.55 + wobble
       pts.push({ x: cx + Math.cos(a) * r * 1.6, y: cy + Math.sin(a) * r })
     }
@@ -307,10 +485,8 @@ Canvas {
     ctx.globalAlpha = 1.0
   }
 
-  // Pulse: a tile grid that shatters outward on every kick. A smoothed
-  // bass envelope keeps tiles jittering between hits; each detected beat
-  // fires a flash that bursts them outward, then they settle back.
-  // No circles, no lines — only bouncing tiles.
+  // Pulse: tile grid shattering outward per kick (smoothed bass
+  // envelope + beat flash with cooldown).
   function paintPulse(ctx) {
     var bass = bassLevel()
     var env = pulseEnv || 0
@@ -374,21 +550,29 @@ Canvas {
     ctx.globalAlpha = 1.0
   }
 
-  // Tide: two slow ribbons drifting past each other, swelling with the
-  // average level and rippled per-column by the spectrum.
+  // Tide: two ribbons morphing with music; kick spring shoves sideways.
   function paintTide(ctx) {
     var layers = 2
     ctx.fillStyle = foreground
+    if (!tideOff || tideOff.length !== 2) tideOff = [0, 0]
+    var tfl = tideFlash || 0
+    var avg = average()
+    var tr = 0
+    for (var tb = 6; tb < barCount; tb++) tr += level(tb)
+    tr /= Math.max(1, barCount - 6)
+    var shove = (tideRD || 0) * 8
     for (var L = 0; L < layers; L++) {
-      var speed = 0.5 + L * 0.3
-      var freq = (1.6 + L * 0.9) * Math.PI * 2 / width
-      var amp = (height / 2 - 2) * (0.30 + 0.45 * average()) * (1 - L * 0.25)
+      var freq = (1.6 + L * 0.9) * Math.PI * 2 / width * (1 + avg * 0.8 + tfl * 0.5)
+      var amp = (height / 2 - 2) * (0.34 + 0.45 * avg) * (1 + tfl * 0.6) * (1 - L * 0.25)
       var mid = height / 2 + (L - 0.5) * 3
+      var off = (tideOff[L] || 0)
       ctx.beginPath()
       ctx.moveTo(1, mid)
       for (var x = 1; x <= width - 1; x += 2) {
+        var sx = x + shove
         var f = level(Math.floor((x / width) * barCount) % barCount)
-        var y = mid + Math.sin(x * freq + phase * speed + L * 2.4) * amp * (0.4 + 0.6 * f)
+        var y = mid + Math.sin(sx * freq + off + L * 2.4) * amp * (0.4 + 0.6 * f)
+          + Math.sin(sx * freq * 2.7 + off * 1.7 + L) * amp * 0.25 * tr
         ctx.lineTo(x, y)
       }
       ctx.lineWidth = 1.6 - L * 0.4
@@ -399,28 +583,51 @@ Canvas {
     ctx.globalAlpha = 1.0
   }
 
-  // Stars: a twinkling field — twinkle speed follows the music, loud hits
-  // flash a few into little cross sparkles.
+  // Stars: blinking field; downbeats reshuffle + burst crosses.
   function paintStars(ctx) {
     var avg = average()
+    var flash = starFlash || 0
     var count = 36
+    if (!starPos || starPos.length !== count || !starAge || starAge.length !== count) {
+      starPos = []
+      starAge = []
+      for (var z = 0; z < count; z++) {
+        starPos.push({ x: Math.random(), y: Math.random() })
+        starAge.push(Math.random())
+      }
+    }
+    // Fresh kicks read flash > 0.9 for a frame or two.
+    if (flash > 0.9) {
+      for (var q = 0; q < 5; q++) {
+        var idx = Math.floor(Math.random() * count)
+        starPos[idx] = { x: Math.random(), y: Math.random() }
+        starAge[idx] = 0
+      }
+    }
+    var sparkles = 0
     ctx.fillStyle = foreground
     ctx.strokeStyle = foreground
     for (var i = 0; i < count; i++) {
-      var hx = Math.abs(Math.sin(i * 127.1) * 43758.5453) % 1
-      var hy = Math.abs(Math.sin(i * 311.7 + 17.3) * 12543.1234) % 1
-      var x = 1 + hx * (width - 2)
-      var y = 1 + hy * (height - 2)
-      var tw = Math.abs(Math.sin(phase * (0.8 + avg * 2.5) + i * 2.39996))
+      starAge[i] += 0.008 + avg * 0.02 + flash * 0.03
+      if (starAge[i] >= 1) {
+        starPos[i] = { x: Math.random(), y: Math.random() }
+        starAge[i] = 0
+      }
+      var fade = Math.sin(Math.min(1, starAge[i]) * Math.PI)
+      var x = 1 + starPos[i].x * (width - 2)
+      var y = 1 + starPos[i].y * (height - 2)
+      var tw = Math.abs(Math.sin(phase * (0.8 + avg * 2.5 + flash * 3.0) + i * 2.39996))
       var f = level(i % barCount)
-      var a = 0.15 + 0.75 * tw * (0.35 + 0.65 * Math.max(avg, f))
-      var r = 0.7 + 1.1 * tw * (0.4 + 0.6 * f)
+      var a = (0.15 + 0.75 * tw * (0.35 + 0.65 * Math.max(avg, f)) + flash * 0.45) * (0.15 + 0.85 * fade)
+      var r = 0.7 + 1.1 * tw * (0.4 + 0.6 * f) + flash * 1.2 * (0.5 + f)
       ctx.globalAlpha = Math.min(1, a)
       ctx.beginPath()
       ctx.arc(x, y, r, 0, Math.PI * 2)
       ctx.fill()
-      if (tw > 0.93 && f > 0.45) {
-        var s = r + 2.2
+      // Crosses ignite on kicks through warm stars (capped at 8).
+      if (flash > 0.35 && f > 0.30 && sparkles < 8) {
+        sparkles++
+        var s = r + 1.5 + flash * 2
         ctx.globalAlpha = Math.min(1, a + 0.2)
         ctx.lineWidth = 1
         ctx.beginPath()
@@ -432,220 +639,394 @@ Canvas {
     ctx.globalAlpha = 1.0
   }
 
-  // Twin flame spikes per column with a hot flicker — mirrored around the
-  // center line so kicks punch both ways at once.
-  function paintFlame(ctx) {
-    var n = barCount
+  // Helix: flowing DNA strand — smooth rails, beaded rungs at crossings;
+  // twist + beads pump with the music.
+  function paintHelix(ctx) {
     var mid = height / 2
-    var amp = (height / 2) - 1.5
-    var slot = (width - 2) / n
-    var bw = Math.max(2, slot * 0.7)
+    var avg = average()
+    var bass = bassLevel()
+    var amp = Math.max(2.5, (height / 2) - 3) * (0.55 + 0.45 * Math.max(avg, bass))
+    var step = 4
     ctx.fillStyle = foreground
-    for (var i = 0; i < n; i++) {
-      var f = level(i)
-      var flick = 0.85 + 0.15 * Math.sin(phase * 11 + i * 2.4)
-      var h = Math.max(1, amp * f * flick)
-      var x = 1 + slot * i + slot / 2
-      ctx.globalAlpha = 0.9
+    ctx.strokeStyle = foreground
+    ctx.lineCap = "round"
+    var top = []
+    var bot = []
+    var x, s
+    for (x = 2; x <= width - 2; x += step) {
+      s = Math.sin(x * 0.22 + helixTwist)
+      top.push({ x: x, y: mid + s * amp, s: s })
+      bot.push({ x: x, y: mid - s * amp, s: s })
+    }
+    var n = top.length
+    // flowing backbones first (behind everything)
+    ctx.lineWidth = 1.4
+    for (var R = 0; R < 2; R++) {
+      var pts = (R === 0) ? top : bot
+      ctx.globalAlpha = 0.45 + 0.35 * Math.max(avg, 0.3)
       ctx.beginPath()
-      ctx.moveTo(x - bw / 2, mid)
-      ctx.lineTo(x, mid - h)
-      ctx.lineTo(x + bw / 2, mid)
-      ctx.closePath()
-      ctx.fill()
-      ctx.beginPath()
-      ctx.moveTo(x - bw / 2, mid)
-      ctx.lineTo(x, mid + h)
-      ctx.lineTo(x + bw / 2, mid)
-      ctx.closePath()
-      ctx.fill()
-      if (f > 0.5) {
-        ctx.globalAlpha = 1.0
-        ctx.beginPath()
-        ctx.arc(x, mid - h, 1.2, 0, Math.PI * 2)
-        ctx.fill()
-        ctx.beginPath()
-        ctx.arc(x, mid + h, 1.2, 0, Math.PI * 2)
-        ctx.fill()
+      ctx.moveTo(pts[0].x, pts[0].y)
+      for (var k = 1; k < n - 1; k++) {
+        var xc = (pts[k].x + pts[k + 1].x) / 2
+        var yc = (pts[k].y + pts[k + 1].y) / 2
+        ctx.quadraticCurveTo(pts[k].x, pts[k].y, xc, yc)
       }
+      ctx.lineTo(pts[n - 1].x, pts[n - 1].y)
+      ctx.stroke()
+    }
+    // rungs + beads per column
+    for (var i = 0; i < n; i++) {
+      var f = level(Math.floor((top[i].x / width) * barCount) % barCount)
+      var si = top[i].s
+      if (Math.abs(si) < 0.42) {
+        ctx.globalAlpha = Math.min(1, 0.35 + 0.5 * f + bass * 0.25)
+        ctx.lineWidth = 1.2
+        ctx.beginPath()
+        ctx.moveTo(top[i].x, top[i].y)
+        ctx.lineTo(bot[i].x, bot[i].y)
+        ctx.stroke()
+      }
+      var r = 1.0 + 1.4 * f + bass * 1.0
+      var frontTop = si >= 0
+      ctx.globalAlpha = frontTop ? (0.7 + 0.3 * f) : (0.45 + 0.3 * f)
+      ctx.beginPath()
+      ctx.arc(top[i].x, top[i].y, frontTop ? r : Math.max(0.8, r * 0.85), 0, Math.PI * 2)
+      ctx.fill()
+      ctx.globalAlpha = frontTop ? (0.45 + 0.3 * f) : (0.7 + 0.3 * f)
+      ctx.beginPath()
+      ctx.arc(bot[i].x, bot[i].y, frontTop ? Math.max(0.8, r * 0.85) : r, 0, Math.PI * 2)
+      ctx.fill()
     }
     ctx.globalAlpha = 1.0
   }
 
-  // Aurora: three translucent sine ribbons drifting over each other.
+  // Aurora: bass/mid/treble ribbons — spaced, distinct speeds and glow.
   function paintAurora(ctx) {
+    var avg = average()
+    var bass = bassLevel()
+    var tr = 0
+    for (var bb = 6; bb < barCount; bb++) tr += level(bb)
+    tr /= Math.max(1, barCount - 6)
+    var energies = [Math.max(avg, bass), avg, Math.max(avg, tr)]
+    var speeds = [0.6, 1.1, 1.9]
+    var freqs = [1.6, 2.6, 4.0]
+    var widths = [1.0, 0.8, 0.6]
+    var glows = [0.14, 0.20, 0.30]
     var layers = 3
     ctx.fillStyle = foreground
     for (var L = 0; L < layers; L++) {
-      var speed = 0.9 + L * 0.45
-      var freq = (2.2 + L * 1.1) * Math.PI * 2 / width
-      var amp = (height / 2 - 2) * (0.35 + 0.3 * average()) * (1 - L * 0.22)
-      var mid = height / 2 + (L - 1) * 2
+      var energy = energies[L]
+      var freq = freqs[L] * Math.PI * 2 / width
+      var amp = (height / 2 - 2) * (0.30 + 0.55 * energy) * widths[L]
+      var mid = height / 2 + (L - 1) * 3.5
       ctx.beginPath()
       ctx.moveTo(1, height - 1)
       for (var x = 1; x <= width - 1; x += 2) {
         var f = level(Math.floor((x / width) * barCount) % barCount)
-        var y = mid + Math.sin(x * freq + phase * speed + L * 2.1) * amp * (0.35 + 0.65 * f)
+        var y = mid + Math.sin(x * freq + phase * speeds[L] + L * 2.1) * amp * (0.35 + 0.65 * f)
         ctx.lineTo(x, y)
       }
       ctx.lineTo(width - 1, height - 1)
       ctx.closePath()
-      ctx.globalAlpha = 0.22 - L * 0.04
+      ctx.globalAlpha = glows[L] * (0.75 + 0.5 * energy)
       ctx.fill()
     }
     ctx.globalAlpha = 1.0
   }
 
-  // Tall alternating spikes with hot tips — every bin gets full vertical
-  // travel, odds firing down while evens fire up.
-  function paintSpikes(ctx) {
-    var n = barCount
+  // Lightning: jagged/spear strikes, random flow; beat forks; kick white-out.
+  function paintLightning(ctx) {
+    var avg = average()
+    var bass = bassLevel()
+    var flash = lightFlash || 0
     var mid = height / 2
-    var amp = (height / 2) - 1
+    var amp = Math.max(2, (height / 2) - 2.5)
+    var energy = 0.25 + 0.75 * Math.max(avg, bass)
+    // Strike roll: jagged leads, spears punctuate, flow either way.
+    if (!lightModeLeft || lightModeLeft <= 0) {
+      var roll = Math.random()
+      lightMode = (roll < 0.72) ? 0 : 2
+      lightFlow = (Math.random() < 0.5) ? 1 : -1
+      if (lightMode === 2) {
+        lightModeLeft = 4 + Math.floor(Math.random() * 5)
+        lightTilt = (Math.random() - 0.5) * 0.14
+      } else {
+        lightModeLeft = 6 + Math.floor(Math.random() * 11)
+      }
+    }
+    lightModeLeft--
+    // kicks force wild jagged with a freshly rolled flow
+    if (flash > 0.5) {
+      lightMode = 0
+      lightModeLeft = 6
+      lightFlow = (Math.random() < 0.5) ? 1 : -1
+    }
+    var straight = (lightMode === 2)
+    var backward = (lightFlow < 0)
+    // joints: music deviation + fresh jitter (near-clean for spears)
+    var jx = [], jy = [], jf = []
+    for (var i = 0; i < barCount; i++) {
+      var f = level(i)
+      var x = 1 + (width - 2) * (barCount === 1 ? 0.5 : (i / (barCount - 1)))
+      var y
+      if (straight) {
+        y = mid + (x - width / 2) * lightTilt
+          - (f - avg) * amp * 0.5
+          + (Math.random() - 0.5) * 0.6
+      } else {
+        y = mid - (f - avg) * amp * 1.6
+          + (Math.random() - 0.5) * (1.5 + energy * 3.5)
+      }
+      if (y < 1) y = 1
+      if (y > height - 1) y = height - 1
+      jx.push(x); jy.push(y); jf.push(f)
+    }
     ctx.strokeStyle = foreground
     ctx.fillStyle = foreground
-    ctx.lineWidth = 1.6
     ctx.lineCap = "round"
-    for (var i = 0; i < n; i++) {
-      var f = level(i)
-      var x = 1 + (width - 2) * (n === 1 ? 0.5 : (i / (n - 1)))
-      var h = Math.max(1.5, amp * f)
-      var dir = (i % 2 === 0) ? -1 : 1
-      ctx.globalAlpha = 0.35 + 0.65 * f
+    ctx.lineJoin = "round"
+    // faint full-path wash behind everything — breathes up on kicks
+    ctx.globalAlpha = 0.05 + 0.08 * energy + flash * 0.30
+    ctx.lineWidth = 2.5 + flash * 2
+    ctx.beginPath()
+    ctx.moveTo(jx[0], jy[0])
+    for (var w = 1; w < barCount; w++) ctx.lineTo(jx[w], jy[w])
+    ctx.stroke()
+    // Core highlight lives for the beat: dim bolt calm, bright surge.
+    var coreA = Math.min(1, (straight ? 0.30 : 0.12) + 0.30 * energy + flash * 0.60)
+    var coreW = (straight ? 1.0 : 1.1) + flash * 1.2
+    var fracs = [1.0, 0.6, 0.32]
+    var zalpha = [0.35, 0.7, 1.0]
+    for (var zi = 0; zi < 3; zi++) {
+      var cnt = Math.max(2, Math.floor(barCount * fracs[zi]))
+      var lo = backward ? 0 : barCount - cnt
+      ctx.globalAlpha = coreA * zalpha[zi]
+      ctx.lineWidth = coreW
       ctx.beginPath()
-      ctx.moveTo(x, mid)
-      ctx.lineTo(x, mid + dir * h)
+      ctx.moveTo(jx[lo], jy[lo])
+      for (var zj = lo + 1; zj < lo + cnt; zj++) ctx.lineTo(jx[zj], jy[zj])
       ctx.stroke()
-      ctx.globalAlpha = 0.9
-      ctx.beginPath()
-      ctx.arc(x, mid + dir * h, 1.4, 0, Math.PI * 2)
-      ctx.fill()
+    }
+    // Forks are beat events at random hot spots, glowing with hits.
+    var cands = []
+    for (var cb = 0; cb < barCount; cb++) {
+      var cf = level(cb)
+      if (cf > 0.5 || (flash > 0.3 && cf > 0.35)) cands.push(cb)
+    }
+    var maxForks = flash > 0.5 ? 2 : (flash > 0.2 ? 1 : 0)
+    var forks = 0
+    while (forks < maxForks && cands.length > 0) {
+      var ci = Math.floor(Math.random() * cands.length)
+      var b = cands.splice(ci, 1)[0]
+      {
+        forks++
+        var bf = level(b)
+        var bx = 1 + (width - 2) * (barCount === 1 ? 0.5 : (b / (barCount - 1)))
+        var by = mid - (bf - avg) * amp * 1.6
+        var dir = (by >= mid) ? 1 : -1
+        var px = bx, py = by
+        ctx.globalAlpha = Math.min(1, 0.30 + 0.35 * bf + flash * 0.5)
+        ctx.lineWidth = 1
+        ctx.beginPath()
+        ctx.moveTo(px, py)
+        var steps = 3 + Math.floor(Math.random() * 2)
+        for (var k = 0; k < steps; k++) {
+          px += (Math.random() - 0.5) * 10
+          py += dir * (2 + Math.random() * 3 + bf * 2)
+          ctx.lineTo(px, py)
+        }
+        ctx.stroke()
+      }
     }
     ctx.globalAlpha = 1.0
   }
 
-  // Orbit: rings of dots circling the center, each ring's radius breathing
-  // with the music and every dot sized by its own bin. Core throbs on bass.
+  // Galaxy: spiral arms around the beating heart; kicks cascade arm to arm.
   function paintOrbit(ctx) {
     var cx = width / 2
     var cy = height / 2
     var maxR = Math.min(width, height) / 2 - 1
-    var rings = 3
+    var avg = average()
+    var bass = bassLevel()
+    var ofl = orbitFlash || 0
+    var oenv = orbitEnv || 0
+    var arms = 3
+    var sweep = 4.2
+    var dots = 6
     ctx.fillStyle = foreground
-    for (var r = 0; r < rings; r++) {
-      var frac = (r + 1) / rings
-      var rad = Math.max(2, maxR * frac * (0.55 + 0.45 * average()))
-      var dots = 4 + r * 2
+    ctx.strokeStyle = foreground
+    ctx.lineCap = "round"
+    // Core: single throbbing heart, biggest in every state by construction.
+    var beadCeil = (0.6 + 1.6) * 1.1 * (0.65 + 0.5 * Math.min(1, oenv * 1.5)) + ofl * 1.5
+    var heartR = Math.max(2.1 + bass * 1.0 + ofl * 1.2, beadCeil * 1.15 + 0.3)
+    ctx.globalAlpha = Math.min(1, 0.58 + 0.20 * avg + ofl * 0.45)
+    ctx.beginPath()
+    ctx.arc(cx, cy, heartR, 0, Math.PI * 2)
+    ctx.fill()
+    ctx.globalAlpha = Math.min(1, 0.80 + ofl * 0.20)
+    ctx.beginPath()
+    ctx.arc(cx, cy, 1.7 + bass * 1.2 + ofl * 1.0, 0, Math.PI * 2)
+    ctx.fill()
+    // Kick front cascades arm to arm, racing faster on drops.
+    var kickAge = phase - orbitLastKick
+    var frontSpeed = 1.2 + Math.max(avg, bass) * 1.2
+    for (var r = 0; r < arms; r++) {
+      // Arms span core to edge; radius breathes on the envelope.
+      var base = Math.max(2, maxR * (0.55 + 0.45 * oenv) + bass * 1.2)
+      var armPhase = orbitSpin + (r / arms) * Math.PI * 2
+      var front = (kickAge - r * 0.15) * frontSpeed
+      // guide spiral first so beads read as one wheeling arm
+      ctx.globalAlpha = 0.16 + 0.25 * ofl + oenv * 0.06
+      ctx.lineWidth = 1
+      ctx.save()
+      ctx.translate(cx, cy)
+      ctx.scale(2.2, 1)
+      ctx.beginPath()
+      for (var g = 0; g <= 20; g++) {
+        var gt = 0.08 + 0.92 * (g / 20)
+        var ga = armPhase + gt * sweep
+        var gr = base * (0.30 + 0.70 * gt)
+        var gx = Math.cos(ga) * gr, gy = Math.sin(ga) * gr
+        if (g === 0) ctx.moveTo(gx, gy)
+        else ctx.lineTo(gx, gy)
+      }
+      ctx.stroke()
+      ctx.restore()
+      // Beads: positional sizes + fixed character; shared beat lights them.
       for (var k = 0; k < dots; k++) {
-        var a = phase * (0.8 + r * 0.35) + (k / dots) * Math.PI * 2
-        var bin = (r * dots + k) % barCount
-        var lv = level(bin)
-        var rr = rad + lv * 2.5
+        var t = 0.08 + 0.92 * ((k + 0.7) / dots)
+        var a = armPhase + t * sweep
+        var rr = base * (0.30 + 0.70 * t)
         var px = cx + Math.cos(a) * rr * 2.2
         var py = cy + Math.sin(a) * rr
-        ctx.globalAlpha = 0.35 + 0.65 * lv
+        var hv = 0.9 + 0.2 * (Math.abs(Math.sin((r * dots + k) * 12.9898) * 43758.5453) % 1)
+        // Beads rest small in silence (smoothed), full size with groove.
+        var bscale = 0.65 + 0.5 * Math.min(1, oenv * 1.5)
+        var shimmer = 0.5 + 0.5 * Math.sin(t * 12.0 - (phase - orbitLastKick) * 3.0)
+        var dt = t - front
+        var glow = (front > -0.5 ? Math.exp(-(dt * dt) / (0.012 + ofl * 0.02)) : 0) * ofl
+        ctx.globalAlpha = Math.min(1, (0.30 + 0.40 * (1 - t)) * hv * (0.55 + 0.25 * shimmer) + glow * 0.8)
         ctx.beginPath()
-        ctx.arc(px, py, 1 + 1.6 * lv, 0, Math.PI * 2)
+        ctx.arc(px, py, (0.6 + 1.6 * (1 - t)) * hv * bscale + glow * 1.5, 0, Math.PI * 2)
         ctx.fill()
       }
     }
-    ctx.globalAlpha = 0.9
-    ctx.beginPath()
-    ctx.arc(cx, cy, 1.5 + bassLevel() * 2.5, 0, Math.PI * 2)
-    ctx.fill()
     ctx.globalAlpha = 1.0
   }
 
-  // Waveform: scrolling filled band of the recent average level, newest on
-  // the right. Reads like an oscilloscope overview of the groove.
+  // Waveform: auto-gain waterfall; flow + kicks follow music. Pure field.
   function paintWaveform(ctx) {
-    var cols = Math.max(16, Math.floor(width))
-    var buf = waveHist || []
-    buf.push(average())
-    while (buf.length > cols) buf.shift()
-    waveHist = buf
-    var mid = height / 2
-    var amp = (height / 2) - 1.5
-    ctx.beginPath()
-    ctx.moveTo(width - 1, mid)
-    var i, v, x
-    for (i = 0; i < buf.length; i++) {
-      v = Math.min(1, buf[i] * 1.4)
-      x = width - 1 - (buf.length - 1 - i)
-      ctx.lineTo(x, mid - amp * v)
-    }
-    for (var j = buf.length - 1; j >= 0; j--) {
-      v = Math.min(1, buf[j] * 1.4)
-      x = width - 1 - (buf.length - 1 - j)
-      ctx.lineTo(x, mid + amp * v)
-    }
-    ctx.closePath()
-    ctx.globalAlpha = 0.4
-    ctx.fillStyle = foreground
-    ctx.fill()
-    ctx.globalAlpha = 1.0
-    ctx.lineWidth = 1.4
-    ctx.strokeStyle = foreground
-    ctx.stroke()
-  }
-
-  // Confetti: spinning paper bits raining through the strip — fall speed,
-  // sway, size and brightness all follow the music.
-  function paintConfetti(ctx) {
-    var count = 26
-    ctx.fillStyle = foreground
-    for (var i = 0; i < count; i++) {
-      var hx = Math.abs(Math.sin(i * 57.3 + 4.2) * 13921.6641) % 1
-      var hy = Math.abs(Math.sin(i * 113.1 + 9.7) * 27183.9177) % 1
-      var bin = i % barCount
-      var f = level(bin)
-      var fall = 0.06 + 0.16 * (0.3 + 0.7 * f)
-      var y01 = (((hy + phase * fall) % 1) + 1) % 1
-      var x = 1 + hx * (width - 2) + Math.sin(phase * 2 + i * 1.3) * 4
-      var y = 1 + y01 * (height - 2)
-      var s = 1.4 + 1.8 * f
-      ctx.save()
-      ctx.translate(x, y)
-      ctx.rotate(phase * (0.5 + f) + i)
-      ctx.globalAlpha = 0.3 + 0.7 * f
-      ctx.fillRect(-s / 2, -s / 4, s, s / 2)
-      ctx.restore()
-    }
-    ctx.globalAlpha = 1.0
-  }
-
-  // Equalizer: chunky full-travel bars with fast-falling peak caps.
-  function paintEqualizer(ctx) {
+    var hist = specHist || []
+    var cols = hist.length
+    if (cols < 2) return
     var n = barCount
-    var mid = height / 2
-    var amp = (height / 2) - 2.5
-    var slot = (width - 2) / n
-    var bw = Math.max(2.5, slot * 0.72)
-    if (!peaks || peaks.length !== n) {
-      var init = []
-      for (var z = 0; z < n; z++) init.push({ v: 0, t: phase })
-      peaks = init
-    }
+    var cw = 2
+    var ch = height / n
+    var sfl = specFlash || 0
+    var ceil = Math.max(1.5, specMax || 0)
+    // Only music-hot cells draw: silence empties, drops fill.
     ctx.fillStyle = foreground
-    for (var i = 0; i < n; i++) {
-      var f = level(i)
-      var pk = peaks[i]
-      var decayed = pk.v - Math.max(0, phase - pk.t) * 1.4
-      if (f >= decayed) {
-        pk.v = f
-        pk.t = phase
-      } else {
-        pk.v = Math.max(f, decayed)
+    for (var c = 0; c < cols; c++) {
+      var snap = hist[c] || []
+      var fresh = c / (cols - 1)
+      var x = width - (cols - c) * cw
+      for (var b = 0; b < n; b++) {
+        var raw = Math.pow(Math.min(1, (snap[b] || 0) / barMax), 0.8)
+        if (raw <= 0.18) continue
+        var f = Math.pow(Math.min(1, (snap[b] || 0) / ceil), 0.8)
+        ctx.globalAlpha = Math.min(1, (0.20 + 0.40 * f * (0.6 + 0.4 * fresh)) * (1 + sfl * 0.25))
+        ctx.fillRect(x, height - (b + 1) * ch, cw - 0.5, ch - 0.4)
       }
-      var h = Math.max(1.5, amp * f)
-      var x = 1 + slot * i + (slot - bw) / 2
-      ctx.globalAlpha = 0.9
-      ctx.fillRect(x, mid - h, bw, h * 2)
-      var capY = mid - amp * pk.v
-      ctx.globalAlpha = 1.0
-      ctx.fillRect(x - 0.5, capY - 1, bw + 1, 2)
-      ctx.fillRect(x - 0.5, 2 * mid - capY - 1, bw + 1, 2)
     }
+    ctx.globalAlpha = 1.0
+  }
+
+  // Rain: slanted streaks; density/speed/slant follow music, kicks gust.
+  function paintRain(ctx) {
+    var avg = average()
+    var bass = bassLevel()
+    if (!rainDrops) rainDrops = []
+    var flash = rainFlash || 0
+    try {
+      if (bass > 0.55 && (phase - rainLastKick) > 0.5) {
+        rainLastKick = phase
+        flash = 1
+      }
+    } catch (e) {}
+    flash *= 0.86
+    rainFlash = flash
+    // Music-gated spawn: drizzle in silence, rainfall on drops.
+    rainAcc = (rainAcc || 0) + 0.3 + Math.max(avg, bass) * 2.2
+    while (rainAcc >= 1 && rainDrops.length < 60) {
+      rainAcc -= 1
+      rainDrops.push({
+        x: 1 + Math.random() * (width - 2), y: -2,
+        len: 3 + Math.random() * 3, v: 0.8 + Math.random() * 0.4
+      })
+    }
+    if (rainAcc > 4) rainAcc = 4
+    // One shared fall direction: sway + kick gust lean.
+    var tilt = -0.25 + Math.sin(phase * 0.5) * 0.1 + flash * 0.35
+    var dx = Math.sin(tilt), dy = Math.cos(tilt)
+    var fall = 1.0 + avg * 2.0 + flash * 1.5
+    ctx.strokeStyle = foreground
+    ctx.lineWidth = 1.1
+    ctx.lineCap = "round"
+    var next = []
+    for (var i = 0; i < rainDrops.length; i++) {
+      var p = rainDrops[i]
+      p.x += dx * fall * p.v
+      p.y += dy * fall * p.v
+      if (p.y > height + 2 || p.x < -4 || p.x > width + 4) continue
+      if (next.length < 60) next.push(p)
+      ctx.globalAlpha = Math.min(1, 0.25 + 0.5 * Math.min(1, avg + 0.3) + flash * 0.3)
+      ctx.beginPath()
+      ctx.moveTo(p.x, p.y)
+      ctx.lineTo(p.x - dx * p.len, p.y - dy * p.len)
+      ctx.stroke()
+    }
+    rainDrops = next
+    ctx.globalAlpha = 1.0
+  }
+
+  // ECG: monitor sweep; live-spectrum trace flicks both ways, flat in silence.
+  function paintEcg(ctx) {
+    var mid = height / 2
+    var amp = Math.max(2, (height / 2) - 2)
+    var avg = average()
+    var bass = bassLevel()
+    var W = Math.max(8, width - 2)
+    var head = (((ecgHead % 1) + 1) % 1) * W + 1
+    var energy = Math.max(avg, bass)
+    // Trace: raw bins, sharp joints, oldest fading; flat when quiet.
+    ctx.strokeStyle = foreground
+    ctx.lineWidth = 1.4
+    ctx.lineCap = "round"
+    var prevX = -1, prevY = 0
+    for (var x = 1; x <= width - 1; x += 1) {
+      var age = (((head - x) % W) + W) % W
+      if (age > W - 10) { prevX = -1; continue } // erase gap ahead of head
+      var f = level(Math.floor(((x - 1) / W) * barCount) % barCount)
+      // Deviation from average: loud up, quiet down, flat in silence.
+      var y = mid - (f - avg) * amp * 2
+      if (y < 1) y = 1
+      if (y > height - 1) y = height - 1
+      if (prevX >= 0) {
+        ctx.globalAlpha = 0.25 + 0.75 * (1 - age / W)
+        ctx.beginPath()
+        ctx.moveTo(prevX, prevY)
+        ctx.lineTo(x, y)
+        ctx.stroke()
+      }
+      prevX = x
+      prevY = y
+    }
+    // Head: dim crawl-dot in silence, flash on bass.
+    ctx.globalAlpha = Math.min(1, 0.35 + energy * 0.4 + bass * 0.5)
+    ctx.fillStyle = foreground
+    ctx.beginPath()
+    ctx.arc(head, mid, 1.2 + energy * 1.2 + bass * 1.4, 0, Math.PI * 2)
+    ctx.fill()
     ctx.globalAlpha = 1.0
   }
 }

@@ -6,30 +6,18 @@ import Quickshell.Services.Mpris
 import qs.Ui
 import qs.Commons
 
-// mystaryo.media — always-on cava spectrum in the bar. Click for a two-tab
-// player popup: Now Playing (any MPRIS player, cliamp pinned) + cliamp
-// browser (radio/local via daemon IPC, cold-start included).
-//
-// Design rules: MPRIS + audio-tap data only (no notification listeners, so
-// unknown sounds can only ever move bars, never crash anything). Every
-// external boundary (cava, cliamp socket, metadata shapes) degrades to a
-// static/empty state instead of failing. No absolute paths: the cava config
-// ships in this folder; colors come from the live bar theme.
+// mystaryo.media — cava spectrum in the bar. Click: Now Playing + cliamp tabs.
+// Design rules: MPRIS + audio-tap data only; every external boundary
+// degrades to static/empty; no absolute paths, theme colors only.
 BarWidget {
   id: root
   moduleName: "mystaryo.media"
 
   // ---- MPRIS players directly (no omarchy.media service dependency) ----
-  // The shell only grants firstPartyServiceFor("omarchy.media") proxies to
-  // full-"bar" facades; plain bar-widgets get null there. Mpris.players hands
-  // us the same player objects, so we track them ourselves. Works whether
-  // or not the stock media service/widget is enabled.
+  // Plain bar-widgets get null proxies, so we track Mpris.players ourselves.
   readonly property var allPlayers: Mpris.players ? Mpris.players.values : []
-  // Preferred Now Playing source (settings gear → Music player). "auto"
-  // follows whichever player is active (playing first, then titled, then
-  // first found). Stored as a normalized dbus suffix so per-launch
-  // ".instanceNNN" suffixes don't break the match. cliamp is never a Now
-  // Playing source — it has its own tab.
+  // Now Playing source ("auto" = active player), stored as normalized dbus
+  // suffix; cliamp never a source — it has its own tab.
   property string musicPlayerPref: "auto"
   // Set true for journal debugging (command calls, focus changes, search).
   // Default off: the widget is chatty otherwise (settings IO, cliamp IPC).
@@ -111,11 +99,8 @@ BarWidget {
     root.musicPlayerPref = v
     saveMusicPlayer()
   }
-  // Now Playing source list. Under Auto that's whichever app is active
-  // (playing first, then titled, then first found, cliamp excluded). With a
-  // locked app, that app when present — otherwise falls back to Auto so the
-  // tab never goes empty while something else plays.
-  // The spectrum still dances for any audio regardless.
+  // Now Playing list: active player under Auto; locked app when present,
+  // else Auto fallback so the tab never goes empty.
   readonly property var sourcePlayers: {
     var pool = []
     for (var i = 0; i < allPlayers.length; i++) {
@@ -239,11 +224,8 @@ BarWidget {
     cliampCall("runtime.toggle", {}, function() { refreshCliampTab() })
   }
 
-  // ---- shared key handling: EITHER window may own keyboard focus ----
-  // The popup opens from a bar click, so keyboard focus usually stays on the
-  // bar window; Hyprland may or may not move it into the popup as the mouse
-  // travels. Handling keys in BOTH windows makes typing work regardless of
-  // mouse position. Only the focused window's catcher fires per keypress.
+  // ---- shared key handling: keys handled in BOTH windows (focus may sit
+  // on bar or popup); only the focused catcher's handler fires.
   function handleKey(event) {
     if (event.key === Qt.Key_Escape) {
       root.close()
@@ -587,14 +569,14 @@ BarWidget {
     { id: "radar", label: "Radar" },
     { id: "tide", label: "Tide" },
     { id: "stars", label: "Stars" },
-    { id: "flame", label: "Flame" },
+    { id: "helix", label: "Helix" },
     { id: "aurora", label: "Aurora" },
-    { id: "spikes", label: "Spikes" },
+    { id: "lightning", label: "Lightning" },
     { id: "orbit", label: "Orbit" },
     { id: "particles", label: "Particles" },
-    { id: "confetti", label: "Confetti" },
+    { id: "rain", label: "Rain" },
     { id: "pulse", label: "Pulse" },
-    { id: "equalizer", label: "Equalizer" },
+    { id: "ecg", label: "ECG" },
     { id: "waveform", label: "Waveform" }
   ]
   property string visualStyle: "blocks"
@@ -613,9 +595,17 @@ BarWidget {
       try {
         var j = JSON.parse(out)
         if (!j) return
-        if (typeof j.visualStyle === "string" && visualStyleValid(j.visualStyle)) {
-          root.visualStyle = j.visualStyle
-          try { vizCanvas.requestPaint() } catch (e) {}
+        if (typeof j.visualStyle === "string") {
+          var v = j.visualStyle
+          if (v === "flame") v = "helix"
+          if (v === "equalizer" || v === "tunnel" || v === "scanner") v = "ecg"
+          if (v === "confetti") v = "fireworks"
+          if (v === "fireworks" || v === "comet" || v === "fountain") v = "rain"
+          if (v === "spikes" || v === "ripple") v = "lightning"
+          if (visualStyleValid(v)) {
+            root.visualStyle = v
+            try { vizCanvas.requestPaint() } catch (e) {}
+          }
         }
         if (typeof j.musicPlayer === "string" && j.musicPlayer !== "") {
           root.musicPlayerPref = j.musicPlayer.toLowerCase()
@@ -644,11 +634,8 @@ BarWidget {
     setVisualStyle(visualStyles[(idx + 1) % visualStyles.length].id)
   }
 
-  // ---- bar presence: spectrum on a stock WidgetButton ----
-  // The strip IS a WidgetButton (same as mystaryo.menu and every stock
-  // widget), so border/cursor/hover-pill/click routing all behave exactly
-  // like the others. The canvas floats above its blank label and never
-  // touches mouse input, so hover and clicks fall through to the button.
+  // ---- bar presence: the strip IS a stock WidgetButton; the canvas floats
+  // above its blank label ignoring mouse input, so hover/clicks fall through.
   implicitWidth: root.cavaDead ? 24 : vizCanvas.width + Style.space(8)
   implicitHeight: barSize
   // Tooltip gate the shell's Bar machinery reads (kept for showTooltip parity).
@@ -703,11 +690,8 @@ BarWidget {
     root.popupOpen = !root.popupOpen
   }
 
-  // ---- popup: fullscreen transparent PanelWindow (stock menu pattern) ----
-  // An xdg-popup card never reliably owns keyboard focus, which forced the
-  // move-mouse-out-to-type dance. Exclusive keyboard focus fixes it: while
-  // open, keystrokes always reach the popup's catcher. Outside-click still
-  // dismisses via the scrim.
+  // ---- popup: fullscreen transparent PanelWindow, exclusive keyboard
+  // focus; scrim outside-click dismisses.
   PanelWindow {
     id: popupPanel
     visible: root.popupOpen

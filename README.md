@@ -27,9 +27,9 @@ right-click cycles the visual style.
 
 ## Bar visuals (18)
 
-Wave (default), Bars, Bloom, Blocks, Dots, Blob, Radar, Tide, Stars, Flame,
-Aurora, Spikes, Orbit, Particles, Confetti, Pulse (beat-shatter tiles),
-Equalizer, Waveform. Pick in the gear tab or right-click the strip to cycle.
+Wave (default), Bars, Bloom, Blocks, Dots, Blob, Radar, Tide, Stars, Helix,
+Aurora, Lightning, Orbit, Particles, Rain, Pulse (beat-shatter tiles),
+ECG, Waveform. Pick in the gear tab or right-click the strip to cycle.
 
 ## Files
 
