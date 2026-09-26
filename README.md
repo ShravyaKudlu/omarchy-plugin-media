@@ -68,7 +68,7 @@ ECG, Waveform. Pick in the gear tab; right-click toggles Words/Spectrum.
 ## Install
 
 ```bash
-omarchy plugin add https://github.com/ShravyaKudlu/omarchy-plugin-media --enable
+omarchy plugin add https://github.com/ShravyaKudlu/omarchy-plugin-resonance --enable
 omarchy bar put mystaryo.media --section left
 omarchy restart shell
 ```
