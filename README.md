@@ -6,8 +6,9 @@ behave exactly like the built-in widgets. Hover shows the playing track in a
 pill below the bar (title — artist). Left-click opens a three-tab popup,
 right-click toggles Words/Spectrum.
 
-![Settings tab](preview-settings.png)
-![cliamp tab](preview-cliamp.png)
+![Settings tab](settings.png)
+![radio tab](radio.png)
+![now_playing_tab](nowplaying.png)
 
 - **Now Playing**: any MPRIS player, tracked directly (no dependency on the
   stock `omarchy.media` service) — cover art, title, artist, Prev/Play/Next/
@@ -28,9 +29,8 @@ right-click toggles Words/Spectrum.
 ## Bar visuals (18)
 
 Wave (default), Bars, Bloom, Blocks, Dots, Blob, Radar, Tide, Stars, Helix,
-Aurora, Lightning, Orbit, Particles, Bounce (four beat-reactive bouncing balls),
-Pulse (beat-shatter tiles),
-ECG, Waveform. Pick in the gear tab; right-click toggles Words/Spectrum.
+Aurora, Lightning, Orbit, Particles, Bounce, Pulse, ECG, Waveform. 
+Pick in the gear tab; right-click toggles Words/Spectrum.
 
 ## Files
 
