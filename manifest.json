@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "mystaryo.media",
   "name": "Resonance",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "author": "mystaryo",
   "description": "Live cava spectrum with 18 selectable visual styles in the bar. Click for Now Playing (any MPRIS player, cover art, transport), a cliamp radio tab, and settings.",
   "kinds": [
