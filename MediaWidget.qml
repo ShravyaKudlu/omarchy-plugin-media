@@ -397,13 +397,10 @@ BarWidget {
       root.barValues = out
     } catch (e) { /* keep previous frame, never crash on junk */ }
   }
-  // Audio chain: parecord taps the default sink monitor as raw s16le into a
-  // fifo; cava reads it and emits raw frames. Single recorder child so the
-  // EXIT trap reaps it cleanly, plus fuser -k at startup to reap any writers
-  // orphaned by earlier hot-reloads (two writers interleave bytes = flat bars).
+  // Use a private runtime FIFO and clean up only the recorder started here.
   Process {
     id: cavaProc
-    command: ["sh", "-c", "F=/tmp/mystaryo-media-cava.fifo; [ -p \"$F\" ] || mkfifo \"$F\"; fuser -k \"$F\" 2>/dev/null; M=$(pactl get-default-sink).monitor; parecord --device=\"$M\" --format=s16le --rate=48000 --channels=2 --latency-msec=50 --process-time-msec=20 --raw \"$F\" & REC=$!; trap \"kill $REC 2>/dev/null\" EXIT; sed 's/^framerate = .*/framerate = " + root.visualFps + "/' \"" + root.cavaConf + "\" | cava -p /dev/stdin"]
+    command: ["sh", "-c", "R=${XDG_RUNTIME_DIR:-}; [ -n \"$R\" ] || exit 1; D=\"$R/mystaryo-media\"; umask 077; mkdir -p \"$D\" || exit 1; [ ! -L \"$D\" ] && [ -d \"$D\" ] || exit 1; chmod 700 \"$D\" || exit 1; [ \"$(stat -c %u \"$D\")\" = \"$(id -u)\" ] || exit 1; F=\"$D/cava.fifo\"; if [ -e \"$F\" ]; then [ ! -L \"$F\" ] && [ -p \"$F\" ] || exit 1; [ \"$(stat -c %u \"$F\")\" = \"$(id -u)\" ] || exit 1; chmod 600 \"$F\" || exit 1; else mkfifo -m 600 \"$F\" || exit 1; fi; M=$(pactl get-default-sink).monitor || exit 1; parecord --device=\"$M\" --format=s16le --rate=48000 --channels=2 --latency-msec=50 --process-time-msec=20 --raw \"$F\" & REC=$!; trap \"kill $REC 2>/dev/null; rm -f \\\"$F\\\"\" EXIT; sed -e 's/^framerate = .*/framerate = " + root.visualFps + "/' -e \"s|^source = .*|source = $F|\" \"" + root.cavaConf + "\" | cava -p /dev/stdin"]
     running: !root.cavaDead
     stdout: SplitParser {
       splitMarker: "\n"

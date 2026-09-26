@@ -48,9 +48,9 @@ Pick in the gear tab; right-click toggles Words/Spectrum.
   sink monitor, raw s16le, 50ms latency) into a fifo that cava reads at
   the selected visualizer FPS (30 by default) — cava 0.10.x's native
   PipeWire/Pulse inputs attach but read zeros
-  on this system. The wrapper reaps stale fifo writers on startup, so
-  hot-reloads can't stack duplicate recorders. Without them, the bar shows
-  a static ♪.
+  on this system. The wrapper uses a private per-user runtime fifo and cleans
+  up only the recorder process it started, so hot-reloads cannot stack
+  duplicate recorders. Without them, the bar shows a static ♪.
 - `cliamp` daemon (`cliamp -d`, auto-started from the cliamp tab) — without
   it, the widget is pure-MPRIS (spectrum + transport for any player).
 
